@@ -65,6 +65,44 @@ impl ConnectorProblem {
         }
     }
 
+    pub fn audit_outcome(self) -> &'static str {
+        if self.status().is_server_error() {
+            "failed"
+        } else {
+            "denied"
+        }
+    }
+
+    pub fn denial_stage(self) -> Option<&'static str> {
+        match self {
+            Self::ConfigInvalid => None,
+            Self::ClientIdentityMissing | Self::ClientIdentityDenied => Some("identity"),
+            Self::RouteDenied => Some("route"),
+            Self::PurposeRequired | Self::PurposeDenied => Some("purpose"),
+            Self::UpstreamAuthMissing => None,
+            Self::UpstreamUnavailable => None,
+            Self::BodyTooLarge => Some("request_body"),
+            Self::RequestTimeout => Some("request_timeout"),
+            Self::RateLimited => Some("rate_limit"),
+        }
+    }
+
+    pub fn denial_reason(self) -> Option<&'static str> {
+        match self {
+            Self::ConfigInvalid => None,
+            Self::ClientIdentityMissing => Some("client_identity_missing"),
+            Self::ClientIdentityDenied => Some("client_identity_denied"),
+            Self::RouteDenied => Some("route_denied"),
+            Self::PurposeRequired => Some("purpose_required"),
+            Self::PurposeDenied => Some("purpose_denied"),
+            Self::UpstreamAuthMissing => None,
+            Self::UpstreamUnavailable => None,
+            Self::BodyTooLarge => Some("body_too_large"),
+            Self::RequestTimeout => Some("request_timeout"),
+            Self::RateLimited => Some("rate_limited"),
+        }
+    }
+
     pub fn response(self) -> axum::response::Response {
         Problem::new(
             &format!("urn:registry:problem:{}", self.code()),

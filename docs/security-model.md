@@ -90,8 +90,10 @@ upstream responses, timeouts, connection errors, and body read failures return
 `connector.upstream_unavailable`.
 
 Both connector modes enforce request concurrency and request handling timeouts.
-Server mode also enforces a TLS connection cap, an mTLS handshake timeout, and a
-fixed-window rate limit for each verified client identity and route pair.
+Server mode also enforces a TLS connection cap, an mTLS handshake timeout, an
+HTTP/1 header read timeout, disabled HTTP/1 keep-alive to avoid retained idle
+connections, and a fixed-window rate limit for each verified client identity
+and route pair.
 
 Server mode logs verified client identities only as platform audit reference
 hashes. Production configs should set `audit.hash_secret_env` to a secret that

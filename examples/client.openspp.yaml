@@ -23,6 +23,7 @@ limits:
   upstream_timeout_seconds: 30
   request_timeout_seconds: 30
   tls_handshake_timeout_seconds: 10
+  http1_header_read_timeout_seconds: 10
   max_concurrent_requests: 1024
   max_concurrent_connections: 1024
   max_requests_per_identity_per_minute: 600

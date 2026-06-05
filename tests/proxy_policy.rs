@@ -17,6 +17,7 @@ use registry_trust_connector::config::{
     upstream_timeout, AuditConfig, ClientServerConfig, ClientTrustConfig, ConnectorConfig,
     DefaultsConfig, LimitsConfig, ListenConfig, RouteConfig, TrustAnchorConfig, UpstreamConfig,
 };
+use registry_trust_connector::errors::ConnectorProblem;
 use registry_trust_connector::identity::sha256_hex;
 use registry_trust_connector::proxy::{router, ProxyState};
 use registry_trust_connector::tls::PeerCertificateChain;
@@ -28,6 +29,69 @@ use tower::ServiceExt;
 use url::Url;
 
 const CLIENT_IDENTITY: &str = "spiffe://openspp.example/client/benefits-system";
+
+#[test]
+fn connector_problem_audit_dimensions_are_stable() {
+    let cases = [
+        (
+            ConnectorProblem::ClientIdentityMissing,
+            "denied",
+            Some("identity"),
+            Some("client_identity_missing"),
+        ),
+        (
+            ConnectorProblem::ClientIdentityDenied,
+            "denied",
+            Some("identity"),
+            Some("client_identity_denied"),
+        ),
+        (
+            ConnectorProblem::RouteDenied,
+            "denied",
+            Some("route"),
+            Some("route_denied"),
+        ),
+        (
+            ConnectorProblem::PurposeRequired,
+            "denied",
+            Some("purpose"),
+            Some("purpose_required"),
+        ),
+        (
+            ConnectorProblem::PurposeDenied,
+            "denied",
+            Some("purpose"),
+            Some("purpose_denied"),
+        ),
+        (
+            ConnectorProblem::BodyTooLarge,
+            "denied",
+            Some("request_body"),
+            Some("body_too_large"),
+        ),
+        (
+            ConnectorProblem::RequestTimeout,
+            "denied",
+            Some("request_timeout"),
+            Some("request_timeout"),
+        ),
+        (
+            ConnectorProblem::RateLimited,
+            "denied",
+            Some("rate_limit"),
+            Some("rate_limited"),
+        ),
+        (ConnectorProblem::ConfigInvalid, "failed", None, None),
+        (ConnectorProblem::UpstreamAuthMissing, "failed", None, None),
+        (ConnectorProblem::UpstreamUnavailable, "failed", None, None),
+    ];
+
+    for (problem, outcome, stage, reason) in cases {
+        assert_eq!(problem.audit_outcome(), outcome, "{problem:?}");
+        assert_eq!(problem.denial_stage(), stage, "{problem:?}");
+        assert_eq!(problem.denial_reason(), reason, "{problem:?}");
+    }
+}
 
 #[tokio::test]
 async fn default_request_header_policy_strips_sensitive_hop_by_hop_and_connector_headers() {

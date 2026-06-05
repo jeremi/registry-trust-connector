@@ -9,7 +9,7 @@ use axum::http::{Request, Response, StatusCode};
 use clap::{Parser, Subcommand, ValueEnum};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as HyperBuilder;
 use registry_platform_httpsec::Problem;
 use registry_trust_connector::config::{self, LoadedConfig, Mode};
@@ -146,6 +146,7 @@ async fn run_server(loaded: LoadedConfig) -> Result<(), ConnectorError> {
     let listener = TcpListener::bind(bind).await?;
     let connection_permits = Arc::new(Semaphore::new(config.limits.max_concurrent_connections));
     let tls_handshake_timeout = config::tls_handshake_timeout(&config);
+    let http1_header_read_timeout = config::http1_header_read_timeout(&config);
     info!(mode = "server", listen = %bind, "registry trust connector listening");
 
     loop {
@@ -199,7 +200,12 @@ async fn run_server(loaded: LoadedConfig) -> Result<(), ConnectorError> {
                     Ok::<Response<Body>, Infallible>(response)
                 }
             });
-            let builder = HyperBuilder::new(TokioExecutor::new());
+            let mut builder = HyperBuilder::new(TokioExecutor::new());
+            builder
+                .http1()
+                .timer(TokioTimer::new())
+                .header_read_timeout(http1_header_read_timeout)
+                .keep_alive(false);
             if let Err(err) = builder.serve_connection(io, service).await {
                 tracing::warn!(remote = %remote_addr, error = %err, "connection failed");
             }

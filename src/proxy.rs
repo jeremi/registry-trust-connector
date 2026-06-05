@@ -103,7 +103,17 @@ async fn proxy_handler(
     })
     .await
     .unwrap_or(Err(ConnectorProblem::RequestTimeout));
-    let problem_code = result.as_ref().err().map(|problem| problem.code());
+    let problem = result.as_ref().err().copied();
+    let problem_code = problem.map(|problem| problem.code());
+    let outcome = problem
+        .map(ConnectorProblem::audit_outcome)
+        .unwrap_or("forwarded");
+    let denial_stage = problem
+        .and_then(ConnectorProblem::denial_stage)
+        .unwrap_or("");
+    let denial_reason = problem
+        .and_then(ConnectorProblem::denial_reason)
+        .unwrap_or("");
     let response = match result {
         Ok(response) => response,
         Err(problem) => problem.response(),
@@ -112,11 +122,15 @@ async fn proxy_handler(
     tracing::info!(
         mode = ?state.mode,
         method = %method,
-        path = %path,
+        path_len = path.len(),
+        query_present = query.is_some(),
         request_id = %request_id,
         status = status.as_u16(),
         status_class = status.as_u16() / 100,
+        outcome = outcome,
         problem_code = problem_code.unwrap_or(""),
+        denial_stage = denial_stage,
+        denial_reason = denial_reason,
         latency_ms = started.elapsed().as_millis() as u64,
         "connector request completed"
     );

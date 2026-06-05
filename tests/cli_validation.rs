@@ -1,12 +1,21 @@
 use std::fs;
+use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa,
     KeyPair, KeyUsagePurpose,
 };
+use registry_trust_connector::identity::{load_certs, load_private_key};
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, RootCertStore};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
 
 const CLIENT_IDENTITY: &str = "spiffe://client.example/ns/default/sa/relay";
 
@@ -150,11 +159,181 @@ fn validate_require_env_exits_nonzero_when_required_env_is_invalid_header_value(
     );
 }
 
+#[tokio::test]
+async fn server_closes_slow_http1_headers_after_configured_timeout() {
+    let temp = TempDir::new().expect("temp dir");
+    let certs = write_test_pki(temp.path());
+    let listen = unused_loopback_addr();
+    let config = temp.path().join("server-slow-headers.yaml");
+    let yaml = server_config_yaml(&certs, None)
+        .replacen(
+            r#"listen: "127.0.0.1:0""#,
+            &format!(r#"listen: "{listen}""#),
+            1,
+        )
+        .replacen(
+            "audit:",
+            "limits:\n  http1_header_read_timeout_seconds: 1\n  tls_handshake_timeout_seconds: 2\naudit:",
+            1,
+        );
+    fs::write(&config, yaml).expect("write server config");
+
+    let child = server_command(&config)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start server command");
+    let mut server = ChildGuard(child);
+    wait_for_tcp_listener(listen).await;
+
+    let mut tls = mtls_stream(&certs, listen).await;
+    tls.write_all(b"GET /v1/packages HTTP/1.1\r\nHost: server.example.test\r\n")
+        .await
+        .expect("write partial request");
+
+    let mut buf = [0_u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(3), tls.read(&mut buf))
+        .await
+        .expect("server should close slow header connection within timeout");
+
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "expected closed or reset connection after slow header timeout, got {read:?}"
+    );
+    server.kill();
+}
+
+#[tokio::test]
+async fn server_disables_http1_keep_alive_after_response() {
+    let temp = TempDir::new().expect("temp dir");
+    let certs = write_test_pki(temp.path());
+    let listen = unused_loopback_addr();
+    let config = temp.path().join("server-no-keep-alive.yaml");
+    let yaml = server_config_yaml(&certs, None).replacen(
+        r#"listen: "127.0.0.1:0""#,
+        &format!(r#"listen: "{listen}""#),
+        1,
+    );
+    fs::write(&config, yaml).expect("write server config");
+
+    let child = server_command(&config)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start server command");
+    let mut server = ChildGuard(child);
+    wait_for_tcp_listener(listen).await;
+
+    let mut tls = mtls_stream(&certs, listen).await;
+    tls.write_all(
+        b"GET /v1/packages HTTP/1.1\r\nHost: server.example.test\r\nConnection: keep-alive\r\n\r\n",
+    )
+    .await
+    .expect("write complete request");
+    let response = read_until_connection_closes(&mut tls).await;
+
+    assert!(
+        response.starts_with(b"HTTP/1.1 403 Forbidden"),
+        "expected policy denial response before close, got:\n{}",
+        String::from_utf8_lossy(&response)
+    );
+    server.kill();
+}
+
 fn validate_command(config: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_registry-trust-connector"));
     command.args(["validate", "--config"]);
     command.arg(config);
     command
+}
+
+fn server_command(config: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_registry-trust-connector"));
+    command.args(["server", "--config"]);
+    command.arg(config);
+    command
+}
+
+fn unused_loopback_addr() -> SocketAddr {
+    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    drop(listener);
+    addr
+}
+
+async fn wait_for_tcp_listener(addr: SocketAddr) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match TcpStream::connect(addr).await {
+            Ok(_) => return,
+            Err(err) if Instant::now() < deadline => {
+                let _ = err;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(err) => panic!("server did not start listening on {addr}: {err}"),
+        }
+    }
+}
+
+async fn mtls_stream(
+    certs: &TestPki,
+    addr: SocketAddr,
+) -> tokio_rustls::client::TlsStream<TcpStream> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let mut roots = RootCertStore::empty();
+    for cert in load_certs(&certs.ca_cert).expect("load CA cert") {
+        roots.add(cert).expect("add CA root");
+    }
+    let client_config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(
+            load_certs(&certs.client_cert).expect("load client cert"),
+            load_private_key(&certs.client_key).expect("load client key"),
+        )
+        .expect("client TLS config");
+    let connector = TlsConnector::from(Arc::new(client_config));
+    let stream = TcpStream::connect(addr).await.expect("connect to server");
+    let server_name = ServerName::try_from("server.example.test")
+        .expect("server name")
+        .to_owned();
+    connector
+        .connect(server_name, stream)
+        .await
+        .expect("mTLS handshake")
+}
+
+async fn read_until_connection_closes(
+    stream: &mut tokio_rustls::client::TlsStream<TcpStream>,
+) -> Vec<u8> {
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut buf = [0_u8; 512];
+        loop {
+            let n = stream.read(&mut buf).await.expect("read response");
+            if n == 0 {
+                break;
+            }
+            response.extend_from_slice(&buf[..n]);
+        }
+    })
+    .await
+    .expect("server should close HTTP/1 connection after one response");
+    response
+}
+
+struct ChildGuard(Child);
+
+impl ChildGuard {
+    fn kill(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        self.kill();
+    }
 }
 
 fn assert_success(output: &Output) {

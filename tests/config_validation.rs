@@ -420,6 +420,7 @@ fn config_rejects_zero_inbound_runtime_limits() {
     let mut config = client_config();
     config.limits.request_timeout_seconds = 0;
     config.limits.tls_handshake_timeout_seconds = 0;
+    config.limits.http1_header_read_timeout_seconds = 0;
     config.limits.max_concurrent_requests = 0;
     config.limits.max_concurrent_connections = 0;
     config.limits.max_requests_per_identity_per_minute = 0;
@@ -433,6 +434,10 @@ fn config_rejects_zero_inbound_runtime_limits() {
     assert_error_contains(
         &errors,
         "limits.tls_handshake_timeout_seconds must be greater than zero",
+    );
+    assert_error_contains(
+        &errors,
+        "limits.http1_header_read_timeout_seconds must be greater than zero",
     );
     assert_error_contains(
         &errors,

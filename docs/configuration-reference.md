@@ -96,6 +96,7 @@ identity handles.
 | `upstream_timeout_seconds` | integer | `30` | Upstream request timeout. The value must be greater than zero. |
 | `request_timeout_seconds` | integer | `30` | End-to-end connector request handling timeout. Expired requests return `connector.request_timeout`. |
 | `tls_handshake_timeout_seconds` | integer | `10` | Server-mode mTLS handshake timeout. The value must be greater than zero. |
+| `http1_header_read_timeout_seconds` | integer | `10` | Server-mode HTTP/1 header read timeout after mTLS handshake and protocol selection. The value must be greater than zero. |
 | `max_concurrent_requests` | integer | `1024` | Maximum concurrent requests admitted by each connector process. |
 | `max_concurrent_connections` | integer | `1024` | Maximum concurrent server-mode TLS connections admitted by each connector process. Client mode uses request concurrency limiting but still relies on the runtime server accept loop. |
 | `max_requests_per_identity_per_minute` | integer | `600` | Server-mode fixed-window rate limit for each client identity and route pair. Excess requests return `connector.rate_limited`. |
@@ -185,6 +186,11 @@ responses to callers.
 
 Policy denials and upstream failures return problem responses with a stable
 `code` field.
+
+Request completion logs include stable `outcome`, `problem_code`,
+`denial_stage`, and `denial_reason` fields. The connector does not log the raw
+request path in the completion event; it logs path length and whether a query
+string was present.
 
 | Code | HTTP status | Meaning |
 | --- | --- | --- |

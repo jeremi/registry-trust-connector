@@ -20,6 +20,7 @@ const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_UPSTREAM_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
+const DEFAULT_HTTP1_HEADER_READ_TIMEOUT_SECONDS: u64 = 10;
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 1024;
 const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 const DEFAULT_MAX_REQUESTS_PER_IDENTITY_PER_MINUTE: u32 = 600;
@@ -119,6 +120,8 @@ pub struct LimitsConfig {
     pub request_timeout_seconds: u64,
     #[serde(default = "default_tls_handshake_timeout_seconds")]
     pub tls_handshake_timeout_seconds: u64,
+    #[serde(default = "default_http1_header_read_timeout_seconds")]
+    pub http1_header_read_timeout_seconds: u64,
     #[serde(default = "default_max_concurrent_requests")]
     pub max_concurrent_requests: usize,
     #[serde(default = "default_max_concurrent_connections")]
@@ -136,6 +139,7 @@ impl Default for LimitsConfig {
             upstream_timeout_seconds: default_upstream_timeout_seconds(),
             request_timeout_seconds: default_request_timeout_seconds(),
             tls_handshake_timeout_seconds: default_tls_handshake_timeout_seconds(),
+            http1_header_read_timeout_seconds: default_http1_header_read_timeout_seconds(),
             max_concurrent_requests: default_max_concurrent_requests(),
             max_concurrent_connections: default_max_concurrent_connections(),
             max_requests_per_identity_per_minute: default_max_requests_per_identity_per_minute(),
@@ -282,6 +286,10 @@ fn validate_common(config: &ConnectorConfig, errors: &mut Vec<String>) {
     }
     if config.limits.tls_handshake_timeout_seconds == 0 {
         errors.push("limits.tls_handshake_timeout_seconds must be greater than zero".to_string());
+    }
+    if config.limits.http1_header_read_timeout_seconds == 0 {
+        errors
+            .push("limits.http1_header_read_timeout_seconds must be greater than zero".to_string());
     }
     if config.limits.max_concurrent_requests == 0 {
         errors.push("limits.max_concurrent_requests must be greater than zero".to_string());
@@ -612,6 +620,10 @@ pub fn tls_handshake_timeout(config: &ConnectorConfig) -> Duration {
     Duration::from_secs(config.limits.tls_handshake_timeout_seconds)
 }
 
+pub fn http1_header_read_timeout(config: &ConnectorConfig) -> Duration {
+    Duration::from_secs(config.limits.http1_header_read_timeout_seconds)
+}
+
 fn validate_identity_files(
     prefix: &str,
     identity: &IdentityFiles,
@@ -706,6 +718,10 @@ fn default_request_timeout_seconds() -> u64 {
 
 fn default_tls_handshake_timeout_seconds() -> u64 {
     DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECONDS
+}
+
+fn default_http1_header_read_timeout_seconds() -> u64 {
+    DEFAULT_HTTP1_HEADER_READ_TIMEOUT_SECONDS
 }
 
 fn default_max_concurrent_requests() -> usize {
