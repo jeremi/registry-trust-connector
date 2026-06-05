@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use http::header::HeaderName;
+use http::header::{HeaderName, HeaderValue};
 use http::Method;
 use registry_platform_audit::AuditKeyHasher;
 use serde::{Deserialize, Deserializer};
@@ -449,7 +449,13 @@ fn validate_server(config: &ConnectorConfig, require_env: bool, errors: &mut Vec
         }
         for var in required {
             match env::var(&var) {
-                Ok(value) if !value.trim().is_empty() => {}
+                Ok(value) if !value.trim().is_empty() => {
+                    if HeaderValue::from_str(&value).is_err() {
+                        errors.push(format!(
+                            "required upstream auth env var '{var}' contains invalid characters for an HTTP header value"
+                        ));
+                    }
+                }
                 Ok(_) => {
                     errors.push(format!("required upstream auth env var '{var}' is empty"));
                 }

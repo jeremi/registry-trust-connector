@@ -6,6 +6,7 @@ use std::sync::Once;
 use rustls::pki_types::{CertificateDer, UnixTime};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
+use zeroize::Zeroize;
 
 use crate::config::{dns_identity_map, trust_domain_map, ConnectorConfig, IdentityFiles};
 use crate::errors::ConnectorError;
@@ -104,9 +105,11 @@ pub fn reqwest_mtls_client(
     trust_bundle: &Path,
     timeout: std::time::Duration,
 ) -> Result<reqwest::Client, ConnectorError> {
-    let pem = crate::identity::read_identity_pem(&identity.cert, &identity.key)
+    let mut pem = crate::identity::read_identity_pem(&identity.cert, &identity.key)
         .map_err(ConnectorError::Tls)?;
-    let identity = reqwest::Identity::from_pem(&pem).map_err(|err| {
+    let identity_result = reqwest::Identity::from_pem(&pem);
+    pem.zeroize();
+    let identity = identity_result.map_err(|err| {
         ConnectorError::Tls(format!("failed to load client identity for reqwest: {err}"))
     })?;
     let mut builder = reqwest::Client::builder()

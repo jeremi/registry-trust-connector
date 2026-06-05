@@ -38,6 +38,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"]
 ulid = "1"
 url = { version = "2", features = ["serde"] }
 x509-parser = { version = "0.17", features = ["verify"] }
+zeroize = "1"
 
 [dev-dependencies]
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }

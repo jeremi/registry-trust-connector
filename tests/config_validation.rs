@@ -168,6 +168,26 @@ fn require_env_rejects_short_audit_hash_secret() {
 }
 
 #[test]
+fn require_env_rejects_invalid_upstream_auth_header_value() {
+    let env_var = "REGISTRY_TRUST_CONNECTOR_TEST_INVALID_HEADER_VALUE";
+    std::env::set_var(env_var, "Bearer token\nwith-newline");
+    let mut config = server_config();
+    config
+        .upstream
+        .as_mut()
+        .expect("upstream")
+        .default_auth_header_env = Some(env_var.to_string());
+
+    let errors = validate_config(&config, Mode::Server, true).expect_err("config rejected");
+
+    assert_error_contains(
+        &errors,
+        "contains invalid characters for an HTTP header value",
+    );
+    std::env::remove_var(env_var);
+}
+
+#[test]
 fn client_config_rejects_missing_required_sections() {
     let mut config = client_config();
     config.client_identity = None;

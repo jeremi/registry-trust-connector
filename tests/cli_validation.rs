@@ -120,6 +120,36 @@ fn validate_require_env_exits_nonzero_when_required_env_is_empty() {
     );
 }
 
+#[test]
+fn validate_require_env_exits_nonzero_when_required_env_is_invalid_header_value() {
+    let temp = TempDir::new().expect("temp dir");
+    let certs = write_test_pki(temp.path());
+    let config = temp.path().join("server-require-env.yaml");
+    fs::write(
+        &config,
+        server_config_yaml(
+            &certs,
+            Some("REGISTRY_TRUST_CONNECTOR_TEST_INVALID_HEADER_VALUE"),
+        ),
+    )
+    .expect("write server config");
+
+    let output = validate_command(&config)
+        .args(["--mode", "server", "--require-env"])
+        .env(
+            "REGISTRY_TRUST_CONNECTOR_TEST_INVALID_HEADER_VALUE",
+            "Bearer token\nwith-newline",
+        )
+        .output()
+        .expect("run validate command");
+
+    assert_failure(&output);
+    assert_stderr_contains(
+        &output,
+        "required upstream auth env var 'REGISTRY_TRUST_CONNECTOR_TEST_INVALID_HEADER_VALUE' contains invalid characters for an HTTP header value",
+    );
+}
+
 fn validate_command(config: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_registry-trust-connector"));
     command.args(["validate", "--config"]);

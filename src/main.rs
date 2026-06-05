@@ -2,6 +2,7 @@ use std::convert::Infallible;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
@@ -20,6 +21,9 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 use tracing::{error, info};
+
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(10);
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Registry Trust Connector")]
@@ -143,16 +147,29 @@ async fn run_server(loaded: LoadedConfig) -> Result<(), ConnectorError> {
     info!(mode = "server", listen = %bind, "registry trust connector listening");
 
     loop {
-        let (stream, remote_addr) = listener.accept().await?;
+        let (stream, remote_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to accept connection");
+                tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
+                continue;
+            }
+        };
         let acceptor = acceptor.clone();
         let app = app.clone();
         tokio::spawn(async move {
-            let Ok(tls_stream) = acceptor.accept(stream).await.map_err(|err| {
-                tracing::warn!(remote = %remote_addr, error = %err, "TLS handshake failed");
-                err
-            }) else {
-                return;
-            };
+            let tls_stream =
+                match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(err)) => {
+                        tracing::warn!(remote = %remote_addr, error = %err, "TLS handshake failed");
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::warn!(remote = %remote_addr, "TLS handshake timed out");
+                        return;
+                    }
+                };
             let peer_chain = tls_stream
                 .get_ref()
                 .1
