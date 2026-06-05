@@ -1,0 +1,62 @@
+services:
+  rtc-openspp-client:
+    image: ${CONNECTOR_IMAGE:-registry-trust-connector:dev}
+    build: &connector-build
+      context: ..
+      dockerfile: Dockerfile
+      additional_contexts:
+        registry-platform: ../../registry-platform
+    working_dir: /work
+    command:
+      - client
+      - --config
+      - /work/examples/client.openspp.yaml
+    ports:
+      - "7080:7080"
+    volumes:
+      - .:/work/examples:ro
+    depends_on:
+      - rtc-relay-server
+    networks:
+      - trust-connector
+
+  rtc-relay-server:
+    image: ${CONNECTOR_IMAGE:-registry-trust-connector:dev}
+    build: *connector-build
+    working_dir: /work
+    command:
+      - server
+      - --config
+      - /work/examples/server.relay.yaml
+    ports:
+      - "9443:9443"
+    environment:
+      REGISTRY_RELAY_BEARER_TOKEN: ${REGISTRY_RELAY_BEARER_TOKEN:-dev-replace-me}
+      REGISTRY_RELAY_DCI_BEARER_TOKEN: ${REGISTRY_RELAY_DCI_BEARER_TOKEN:-dev-replace-me}
+    volumes:
+      - .:/work/examples:ro
+    depends_on:
+      - registry-relay
+    networks:
+      - trust-connector
+      - relay-private
+
+  registry-relay:
+    image: ${REGISTRY_RELAY_MOCK_IMAGE:-python:3.12-alpine}
+    working_dir: /work
+    command:
+      - python
+      - /work/examples/relay/mock-relay.py
+    expose:
+      - "8080"
+    environment:
+      REGISTRY_RELAY_BIND: 0.0.0.0:8080
+    volumes:
+      - .:/work/examples:ro
+    networks:
+      - relay-private
+
+networks:
+  trust-connector:
+  relay-private:
+    internal: true

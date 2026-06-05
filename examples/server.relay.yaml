@@ -1,0 +1,49 @@
+# Development example for a Registry Relay-side connector.
+# Run examples/generate-dev-pki.sh before validating or running locally.
+listen: "0.0.0.0:9443"
+connector_id: "relay-server-dev"
+
+server_identity:
+  cert: "examples/certs/relay-connector-server.pem"
+  key: "examples/certs/relay-connector-server-key.pem"
+
+client_trust:
+  allowed_identities:
+    - "spiffe://openspp.example.test/client/local"
+  trust_anchors:
+    - ca: "examples/certs/openspp-client-ca.pem"
+      trust_domain: "openspp.example.test"
+
+upstream:
+  base_url: "http://registry-relay:8080"
+  default_auth_header_env: "REGISTRY_RELAY_BEARER_TOKEN"
+  auth_header_name: "Authorization"
+  auth_header_scheme: "Bearer"
+
+limits:
+  max_body_bytes: 1048576
+  upstream_timeout_seconds: 30
+  expiry_warning_days: 30
+
+routes:
+  - id: "social-registry-read"
+    methods:
+      - "GET"
+    upstream_prefix: "/v1/datasets/social_registry/entities/individual"
+    require_purpose: true
+    purposes:
+      - "https://openspp.example.test/purpose/benefits-eligibility"
+      - "https://openspp.example.test/purpose/case-management"
+    client_identity: "spiffe://openspp.example.test/client/local"
+    forward_client_identity_header: true
+
+  - id: "dci-search"
+    methods:
+      - "POST"
+    upstream_prefix: "/dci/social/registry/sync/search"
+    require_purpose: true
+    purposes:
+      - "https://openspp.example.test/purpose/disability-benefit-intake"
+    client_identity: "spiffe://openspp.example.test/client/local"
+    upstream_auth_header_env: "REGISTRY_RELAY_DCI_BEARER_TOKEN"
+    forward_client_identity_header: true
