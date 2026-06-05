@@ -306,6 +306,12 @@ fn validate_client(config: &ConnectorConfig, require_env: bool, errors: &mut Vec
         errors.push("client config requires server".to_string());
         return;
     };
+    if server.url.scheme() != "https" {
+        errors.push("client server.url must use https".to_string());
+    }
+    if !is_root_url_path(&server.url) {
+        errors.push("client server.url must not include a path".to_string());
+    }
     require_file("server.trust_bundle", &server.trust_bundle, errors);
     let Some(identity) = &config.client_identity else {
         errors.push("client config requires client_identity".to_string());
@@ -413,6 +419,9 @@ fn validate_server(config: &ConnectorConfig, require_env: bool, errors: &mut Vec
         errors.push("server config requires upstream".to_string());
         return;
     };
+    if !is_root_url_path(&upstream.base_url) {
+        errors.push("upstream.base_url must not include a path".to_string());
+    }
     validate_upstream_auth_header_name(&upstream.auth_header_name, errors);
     if matches!(upstream.default_auth_header_env.as_deref(), Some(value) if value.trim().is_empty())
     {
@@ -491,6 +500,10 @@ fn require_audit_hash_env(config: &ConnectorConfig, errors: &mut Vec<String>) {
             "required audit hash env var '{var}' is invalid: {err}"
         ));
     }
+}
+
+fn is_root_url_path(url: &Url) -> bool {
+    matches!(url.path(), "" | "/")
 }
 
 pub fn trust_domain_map(config: &ConnectorConfig) -> BTreeMap<String, Vec<PathBuf>> {

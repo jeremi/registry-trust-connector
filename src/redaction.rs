@@ -26,6 +26,16 @@ pub fn identity_hash_for_log(hasher: &AuditKeyHasher, value: &str) -> String {
         .expect("identity log hash class and canonical input are non-empty")
 }
 
+pub fn certificate_hash_for_log(hasher: &AuditKeyHasher, fingerprint_sha256: &str) -> String {
+    hasher
+        .audit_reference_hash(
+            "registry-trust-connector-client-cert-v1",
+            "",
+            fingerprint_sha256,
+        )
+        .expect("certificate log hash class and canonical input are non-empty")
+}
+
 pub fn sanitized_path(path: &str) -> &str {
     path
 }

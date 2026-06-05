@@ -188,7 +188,7 @@ async fn handle_server(
         &identity.value,
     )
     .map_err(|_| ConnectorProblem::RouteDenied)?;
-    authorize_server_purpose(&route_match, request.headers())?;
+    let authorized_purpose = authorize_server_purpose(&route_match, request.headers())?;
     let (parts, body) = request.into_parts();
     let body = read_limited_body(body, max_body_bytes(&state.config)).await?;
     let upstream = state
@@ -202,6 +202,10 @@ async fn handle_server(
         &parts.headers,
         &ProxyHeaderPolicy::strict().strip_private_prefix("x-registry-connector-"),
     );
+    headers.remove(DATA_PURPOSE);
+    if let Some(purpose) = authorized_purpose {
+        headers.insert(DATA_PURPOSE, header_value(&purpose)?);
+    }
     headers.insert(REQUEST_ID, header_value(request_id)?);
     let auth_value = upstream_auth_header(&state.config, &route_match)?;
     headers.insert(
@@ -218,7 +222,10 @@ async fn handle_server(
             state.audit_hasher.as_ref().ok_or(ConnectorProblem::ConfigInvalid)?,
             &identity.value,
         ),
-        client_cert_hash = %identity.fingerprint_sha256,
+        client_cert_ref_hash = %crate::redaction::certificate_hash_for_log(
+            state.audit_hasher.as_ref().ok_or(ConnectorProblem::ConfigInvalid)?,
+            &identity.fingerprint_sha256,
+        ),
         request_id = %request_id,
         "server connector authorized request"
     );
@@ -271,25 +278,40 @@ fn resolve_client_purpose(
 fn authorize_server_purpose(
     route_match: &RouteMatch<'_>,
     headers: &HeaderMap,
-) -> Result<(), ConnectorProblem> {
+) -> Result<Option<String>, ConnectorProblem> {
+    let purpose = single_data_purpose(headers)?;
     if route_match.route.purposes.is_empty() && !route_match.route.require_purpose {
-        return Ok(());
+        return Ok(purpose);
     }
-    let purpose = headers
-        .get(DATA_PURPOSE)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-        .ok_or(ConnectorProblem::PurposeRequired)?;
+    let purpose = purpose.ok_or(ConnectorProblem::PurposeRequired)?;
     if route_match
         .route
         .purposes
         .iter()
-        .any(|allowed| allowed == purpose)
+        .any(|allowed| allowed == &purpose)
     {
-        Ok(())
+        Ok(Some(purpose))
     } else {
         Err(ConnectorProblem::PurposeDenied)
     }
+}
+
+fn single_data_purpose(headers: &HeaderMap) -> Result<Option<String>, ConnectorProblem> {
+    let mut values = headers.get_all(DATA_PURPOSE).iter().filter_map(|value| {
+        value
+            .to_str()
+            .ok()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    });
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(ConnectorProblem::PurposeDenied);
+    }
+    Ok(Some(first))
 }
 
 fn upstream_auth_header(
@@ -371,9 +393,17 @@ fn request_id(headers: &HeaderMap) -> String {
     headers
         .get(REQUEST_ID)
         .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
+        .filter(|value| valid_request_id(value))
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| Ulid::new().to_string())
+}
+
+fn valid_request_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
 fn header_value(value: &str) -> Result<HeaderValue, ConnectorProblem> {

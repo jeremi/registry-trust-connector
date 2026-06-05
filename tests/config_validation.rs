@@ -178,6 +178,32 @@ fn client_config_rejects_missing_required_sections() {
 }
 
 #[test]
+fn client_config_rejects_plaintext_server_url() {
+    let mut config = client_config();
+    config.server.as_mut().unwrap().url =
+        Url::parse("http://server.example.test").expect("server url");
+
+    let errors = validation_errors(&config, Mode::Client);
+
+    assert_error_contains(&errors, "client server.url must use https");
+}
+
+#[test]
+fn config_rejects_base_urls_with_paths() {
+    let mut client = client_config();
+    client.server.as_mut().unwrap().url =
+        Url::parse("https://server.example.test/private").expect("server url");
+    let client_errors = validation_errors(&client, Mode::Client);
+    assert_error_contains(&client_errors, "client server.url must not include a path");
+
+    let mut server = server_config();
+    server.upstream.as_mut().unwrap().base_url =
+        Url::parse("http://127.0.0.1:9000/private").expect("upstream url");
+    let server_errors = validation_errors(&server, Mode::Server);
+    assert_error_contains(&server_errors, "upstream.base_url must not include a path");
+}
+
+#[test]
 fn server_config_rejects_missing_required_sections() {
     let mut missing_server_identity = server_config();
     missing_server_identity.server_identity = None;

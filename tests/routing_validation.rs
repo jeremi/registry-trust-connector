@@ -19,6 +19,23 @@ fn route(id: &str, local_prefix: &str, upstream_prefix: &str) -> RouteConfig {
     }
 }
 
+fn server_route(id: &str, upstream_prefix: &str, client_identity: &str) -> RouteConfig {
+    RouteConfig {
+        id: id.to_string(),
+        methods: vec![Method::GET],
+        local_prefix: None,
+        upstream_prefix: Some(upstream_prefix.to_string()),
+        require_purpose: false,
+        purpose_source: None,
+        client_identity: Some(client_identity.to_string()),
+        upstream_auth_header_env: None,
+        forward_client_identity_header: false,
+        purposes: Vec::new(),
+        allow_forward_authorization: false,
+        allow_forward_cookie: false,
+    }
+}
+
 #[test]
 fn prefix_matching_respects_segment_boundaries() {
     assert!(prefix_matches("/v1", "/v1"));
@@ -36,6 +53,46 @@ fn prefix_matching_respects_segment_boundaries() {
 
     assert_eq!(matched.route.id, "v1alpha");
     assert_eq!(matched.upstream_path, "/upstream/v1alpha/packages");
+}
+
+#[test]
+fn route_matching_uses_canonical_paths_and_most_specific_prefix() {
+    let routes = vec![
+        route("broad", "/v1", "/upstream/broad"),
+        route("admin", "/v1/admin", "/upstream/admin"),
+    ];
+
+    let matched = find_client_route(&routes, &Method::GET, "/v1/%61dmin/records")
+        .expect("encoded admin path should match canonical admin route");
+
+    assert_eq!(matched.route.id, "admin");
+    assert_eq!(matched.upstream_path, "/upstream/admin/records");
+}
+
+#[test]
+fn server_route_matching_uses_canonical_paths_and_most_specific_prefix() {
+    let routes = vec![
+        server_route("broad", "/v1", "spiffe://client.example/workload"),
+        server_route("admin", "/v1/admin", "spiffe://client.example/workload"),
+    ];
+
+    let matched = registry_trust_connector::routing::find_server_route(
+        &routes,
+        &Method::GET,
+        "/v1/%61dmin/records",
+        "spiffe://client.example/workload",
+    )
+    .expect("encoded admin path should match canonical admin route");
+
+    assert_eq!(matched.route.id, "admin");
+    assert_eq!(matched.upstream_path, "/v1/admin/records");
+}
+
+#[test]
+fn request_paths_reject_encoded_slash_delimiters() {
+    let err = validate_request_path("/v1/a%2fb").expect_err("encoded slash delimiter must fail");
+
+    assert!(err.contains("delimiter"), "unexpected error: {err}");
 }
 
 #[test]

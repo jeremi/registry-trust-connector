@@ -14,7 +14,8 @@ pub fn find_client_route<'a>(
     method: &Method,
     path: &str,
 ) -> Result<RouteMatch<'a>, String> {
-    validate_request_path(path)?;
+    let path = canonical_request_path(path)?;
+    let mut best: Option<(usize, RouteMatch<'a>)> = None;
     for route in routes {
         if !route.methods.iter().any(|candidate| candidate == method) {
             continue;
@@ -22,16 +23,30 @@ pub fn find_client_route<'a>(
         let Some(local_prefix) = route.local_prefix.as_deref() else {
             continue;
         };
-        if !prefix_matches(path, local_prefix) {
+        let local_prefix = canonical_request_path(local_prefix)?;
+        if !prefix_matches(&path, &local_prefix) {
             continue;
         }
-        let upstream_prefix = route.upstream_prefix.as_deref().unwrap_or(local_prefix);
-        return Ok(RouteMatch {
+        let upstream_prefix = route
+            .upstream_prefix
+            .as_deref()
+            .unwrap_or(local_prefix.as_str());
+        let upstream_prefix = canonical_request_path(upstream_prefix)?;
+        let route_match = RouteMatch {
             route,
-            upstream_path: rewrite_prefix(path, local_prefix, upstream_prefix),
-        });
+            upstream_path: rewrite_prefix(&path, &local_prefix, &upstream_prefix),
+        };
+        let prefix_len = local_prefix.len();
+        if best
+            .as_ref()
+            .map(|(best_len, _)| prefix_len > *best_len)
+            .unwrap_or(true)
+        {
+            best = Some((prefix_len, route_match));
+        }
     }
-    Err("no client route matched".to_string())
+    best.map(|(_, route_match)| route_match)
+        .ok_or_else(|| "no client route matched".to_string())
 }
 
 pub fn find_server_route<'a>(
@@ -40,7 +55,8 @@ pub fn find_server_route<'a>(
     path: &str,
     client_identity: &str,
 ) -> Result<RouteMatch<'a>, String> {
-    validate_request_path(path)?;
+    let path = canonical_request_path(path)?;
+    let mut best: Option<(usize, RouteMatch<'a>)> = None;
     for route in routes {
         if !route.methods.iter().any(|candidate| candidate == method) {
             continue;
@@ -51,14 +67,24 @@ pub fn find_server_route<'a>(
         let Some(prefix) = route.upstream_prefix.as_deref() else {
             continue;
         };
-        if prefix_matches(path, prefix) {
-            return Ok(RouteMatch {
+        let prefix = canonical_request_path(prefix)?;
+        if prefix_matches(&path, &prefix) {
+            let route_match = RouteMatch {
                 route,
-                upstream_path: path.to_string(),
-            });
+                upstream_path: path.clone(),
+            };
+            let prefix_len = prefix.len();
+            if best
+                .as_ref()
+                .map(|(best_len, _)| prefix_len > *best_len)
+                .unwrap_or(true)
+            {
+                best = Some((prefix_len, route_match));
+            }
         }
     }
-    Err("no server route matched".to_string())
+    best.map(|(_, route_match)| route_match)
+        .ok_or_else(|| "no server route matched".to_string())
 }
 
 pub fn validate_route_prefix(prefix: &str) -> Result<(), String> {
@@ -72,6 +98,11 @@ pub fn validate_route_prefix(prefix: &str) -> Result<(), String> {
 }
 
 pub fn validate_request_path(path: &str) -> Result<(), String> {
+    let _ = canonical_request_path(path)?;
+    Ok(())
+}
+
+fn canonical_request_path(path: &str) -> Result<String, String> {
     if !path.starts_with('/') {
         return Err("path must start with '/'".to_string());
     }
@@ -79,10 +110,27 @@ pub fn validate_request_path(path: &str) -> Result<(), String> {
     let decoded = percent_decode_str(path)
         .decode_utf8()
         .map_err(|_| "path contains invalid percent-encoding".to_string())?;
+    reject_encoded_delimiters(path, &decoded)?;
     for segment in decoded.split('/') {
         if matches!(segment, "." | "..") {
             return Err("path contains dot segment".to_string());
         }
+    }
+    Ok(decoded.into_owned())
+}
+
+fn reject_encoded_delimiters(raw: &str, decoded: &str) -> Result<(), String> {
+    if raw.as_bytes().contains(&b'%') && decoded.contains('\\') {
+        return Err("path contains encoded delimiter".to_string());
+    }
+    let raw_slashes = raw.as_bytes().iter().filter(|byte| **byte == b'/').count();
+    let decoded_slashes = decoded
+        .as_bytes()
+        .iter()
+        .filter(|byte| **byte == b'/')
+        .count();
+    if decoded_slashes > raw_slashes {
+        return Err("path contains encoded delimiter".to_string());
     }
     Ok(())
 }

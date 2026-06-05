@@ -109,6 +109,8 @@ Resolution:
 
 1. Confirm the route includes the request method.
 2. Confirm the path starts with the configured prefix on a segment boundary.
+   Percent-encoded path delimiters such as `%2f` are rejected, and route
+   matching uses the canonical decoded path.
 3. In client mode, check `local_prefix` and `upstream_prefix`.
 4. In server mode, check `upstream_prefix` and `client_identity`.
 
@@ -130,7 +132,8 @@ Resolution:
 Symptom: a request returns HTTP 403 with `code: connector.purpose_denied`.
 
 Cause: the request included `data-purpose`, but the value is not listed in the
-matched server route's `purposes`.
+matched server route's `purposes`, or the request included duplicate non-empty
+`data-purpose` headers.
 
 Resolution: add the intended purpose to the server route only when that route
 and client identity should be allowed to use it.

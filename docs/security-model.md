@@ -64,8 +64,10 @@ caller from supplying the Relay credential directly through the connector.
 
 ## Request identifiers and connector headers
 
-The connector preserves an inbound `x-request-id` header when it is non-empty.
-If the caller omits it, the connector creates one.
+The connector preserves an inbound `x-request-id` header only when it is
+bounded to 128 characters and contains ASCII letters, digits, `-`, `_`, `.`, or
+`:`. If the caller omits it or sends an invalid value, the connector creates
+one.
 
 Client mode may add:
 

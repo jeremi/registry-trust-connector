@@ -108,6 +108,112 @@ async fn route_flags_allow_authorization_and_cookie_forwarding_when_enabled() {
 }
 
 #[tokio::test]
+async fn server_rejects_duplicate_data_purpose_headers() {
+    std::env::set_var(
+        "REGISTRY_PROXY_POLICY_DUPLICATE_PURPOSE_TOKEN",
+        "relay-token",
+    );
+    let temp = TempDir::new().expect("temp dir");
+    let certs = write_test_pki(temp.path());
+    let (upstream, _received) =
+        start_upstream(upstream_response(StatusCode::OK, vec![], "accepted")).await;
+    let mut config = server_config(&certs, upstream);
+    config.routes[0].upstream_auth_header_env =
+        Some("REGISTRY_PROXY_POLICY_DUPLICATE_PURPOSE_TOKEN".to_string());
+    config.routes[0].require_purpose = true;
+    config.routes[0].purposes = vec!["allowed-purpose".to_string()];
+    let app = router(ProxyState::server(Arc::new(config)).expect("server proxy state"));
+
+    let mut request = Request::builder()
+        .method(Method::GET)
+        .uri("/upstream/records")
+        .header("data-purpose", "allowed-purpose")
+        .header("data-purpose", "denied-purpose")
+        .body(Body::empty())
+        .expect("request");
+    request
+        .extensions_mut()
+        .insert(PeerCertificateChain(vec![certs.client_der]));
+
+    let response = app.oneshot(request).await.expect("proxy response");
+
+    assert_problem(response, StatusCode::FORBIDDEN, "connector.purpose_denied").await;
+    std::env::remove_var("REGISTRY_PROXY_POLICY_DUPLICATE_PURPOSE_TOKEN");
+}
+
+#[tokio::test]
+async fn server_forwards_one_canonical_authorized_purpose_header() {
+    std::env::set_var("REGISTRY_PROXY_POLICY_PURPOSE_TOKEN", "relay-token");
+    let temp = TempDir::new().expect("temp dir");
+    let certs = write_test_pki(temp.path());
+    let (upstream, mut received) =
+        start_upstream(upstream_response(StatusCode::OK, vec![], "accepted")).await;
+    let mut config = server_config(&certs, upstream);
+    config.routes[0].upstream_auth_header_env =
+        Some("REGISTRY_PROXY_POLICY_PURPOSE_TOKEN".to_string());
+    config.routes[0].require_purpose = true;
+    config.routes[0].purposes = vec!["allowed-purpose".to_string()];
+    let app = router(ProxyState::server(Arc::new(config)).expect("server proxy state"));
+
+    let mut request = Request::builder()
+        .method(Method::GET)
+        .uri("/upstream/records")
+        .header("data-purpose", "allowed-purpose")
+        .body(Body::empty())
+        .expect("request");
+    request
+        .extensions_mut()
+        .insert(PeerCertificateChain(vec![certs.client_der]));
+
+    let response = app.oneshot(request).await.expect("proxy response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let request = received.recv().await.expect("captured upstream request");
+    assert_eq!(
+        request.headers.get_all("data-purpose").iter().count(),
+        1,
+        "upstream should receive exactly one purpose header"
+    );
+    assert_eq!(
+        header(&request.headers, "data-purpose"),
+        Some("allowed-purpose")
+    );
+    std::env::remove_var("REGISTRY_PROXY_POLICY_PURPOSE_TOKEN");
+}
+
+#[tokio::test]
+async fn invalid_request_ids_are_regenerated_before_forwarding() {
+    let (upstream, mut received) =
+        start_upstream(upstream_response(StatusCode::OK, vec![], "accepted")).await;
+    let app = client_app(client_config(
+        upstream,
+        route("/local", "/upstream", false, false),
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/local/records")
+                .header("x-request-id", "x".repeat(200))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("proxy response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let request = received.recv().await.expect("captured upstream request");
+    let request_id = header(&request.headers, "x-request-id").expect("request id forwarded");
+    assert_ne!(request_id, "x".repeat(200));
+    assert_eq!(
+        request_id.len(),
+        26,
+        "regenerated request id should be a ULID"
+    );
+}
+
+#[tokio::test]
 async fn response_policy_strips_hop_by_hop_headers_but_preserves_normal_response_parts() {
     let (upstream, _received) = start_upstream(upstream_response(
         StatusCode::CREATED,

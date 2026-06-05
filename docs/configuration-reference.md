@@ -54,6 +54,9 @@ Client mode requires `server`:
 | `url` | URL | Required | HTTPS URL for the server connector. |
 | `trust_bundle` | path | Required | Certificate authority bundle used to verify the server connector certificate. |
 
+`server.url` must use `https` and must not include a path. Route prefixes own
+the forwarded path.
+
 ## Identity files
 
 `client_identity` and `server_identity` use the same shape:
@@ -128,6 +131,9 @@ Server mode requires `upstream`:
 Route-level `upstream_auth_header_env` overrides
 `upstream.default_auth_header_env`.
 
+`upstream.base_url` must not include a path. Route `upstream_prefix` values own
+the private Relay path.
+
 ## Routes
 
 Each route has:
@@ -148,9 +154,10 @@ Each route has:
 | `allow_forward_cookie` | boolean | `false` | client, server | Allows caller-supplied `Cookie` to pass through header filtering. |
 
 Route prefixes must start with `/`, must not contain invalid percent encoding,
-and must not contain decoded `.` or `..` path segments. Prefix matching is
-segment-aware, so `/relay/v1` matches `/relay/v1/records` but not
-`/relay/v10`.
+must not contain decoded `.` or `..` path segments, and request paths must not
+use percent-encoded path delimiters such as `%2f`. Prefix matching is
+canonicalized and segment-aware, so `/relay/v1` matches `/relay/v1/records` but
+not `/relay/v10`.
 
 ## Header policy
 
@@ -160,6 +167,10 @@ The connector strips these request headers before forwarding:
 - `Authorization`, unless the route sets `allow_forward_authorization: true`.
 - `Cookie`, unless the route sets `allow_forward_cookie: true`.
 - All headers with the `x-registry-connector-*` prefix.
+
+Server mode rejects duplicate non-empty `data-purpose` headers. When a purpose
+is authorized, the upstream request receives one canonical `data-purpose`
+header value.
 
 The connector strips hop-by-hop response headers before returning upstream
 responses to callers.

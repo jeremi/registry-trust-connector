@@ -12,7 +12,7 @@ services:
       - --config
       - /work/examples/client.openspp.yaml
     ports:
-      - "7080:7080"
+      - "127.0.0.1:7080:7080"
     volumes:
       - .:/work/examples:ro
     depends_on:
@@ -29,7 +29,7 @@ services:
       - --config
       - /work/examples/server.relay.yaml
     ports:
-      - "9443:9443"
+      - "127.0.0.1:9443:9443"
     environment:
       REGISTRY_RELAY_BEARER_TOKEN: ${REGISTRY_RELAY_BEARER_TOKEN:-dev-replace-me}
       REGISTRY_RELAY_DCI_BEARER_TOKEN: ${REGISTRY_RELAY_DCI_BEARER_TOKEN:-dev-replace-me}
