@@ -1,0 +1,41 @@
+# Development example for an OpenSPP-side connector.
+# Run examples/generate-dev-pki.sh before validating or running locally.
+listen: "0.0.0.0:7080"
+allow_non_loopback_client_listen: true
+connector_id: "openspp-local-dev"
+
+server:
+  url: "https://rtc-relay-server:9443"
+  trust_bundle: "examples/certs/relay-server-ca.pem"
+
+client_identity:
+  cert: "examples/certs/openspp-client.pem"
+  key: "examples/certs/openspp-client-key.pem"
+
+defaults:
+  data_purpose: "https://openspp.example.test/purpose/benefits-eligibility"
+
+audit:
+  allow_unkeyed_hashing: true
+
+limits:
+  max_body_bytes: 1048576
+  upstream_timeout_seconds: 30
+  expiry_warning_days: 30
+
+routes:
+  - id: "social-registry-read"
+    methods:
+      - "GET"
+    local_prefix: "/relay/v1/datasets/social_registry/entities/individual"
+    upstream_prefix: "/v1/datasets/social_registry/entities/individual"
+    require_purpose: true
+    purpose_source: "static_route_default"
+
+  - id: "dci-search"
+    methods:
+      - "POST"
+    local_prefix: "/relay/dci/social/registry/sync/search"
+    upstream_prefix: "/dci/social/registry/sync/search"
+    require_purpose: true
+    purpose_source: "client_provided"

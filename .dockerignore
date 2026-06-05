@@ -1,0 +1,5 @@
+/target/
+/.git/
+/examples/.env
+/examples/certs/
+**/__pycache__/
