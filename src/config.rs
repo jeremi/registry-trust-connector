@@ -18,6 +18,11 @@ use crate::routing::validate_route_prefix;
 
 const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_UPSTREAM_TIMEOUT_SECONDS: u64 = 30;
+const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
+const DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
+const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 1024;
+const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
+const DEFAULT_MAX_REQUESTS_PER_IDENTITY_PER_MINUTE: u32 = 600;
 const DEFAULT_EXPIRY_WARNING_DAYS: i64 = 30;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,6 +115,16 @@ pub struct LimitsConfig {
     pub max_body_bytes: usize,
     #[serde(default = "default_upstream_timeout_seconds")]
     pub upstream_timeout_seconds: u64,
+    #[serde(default = "default_request_timeout_seconds")]
+    pub request_timeout_seconds: u64,
+    #[serde(default = "default_tls_handshake_timeout_seconds")]
+    pub tls_handshake_timeout_seconds: u64,
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+    #[serde(default = "default_max_concurrent_connections")]
+    pub max_concurrent_connections: usize,
+    #[serde(default = "default_max_requests_per_identity_per_minute")]
+    pub max_requests_per_identity_per_minute: u32,
     #[serde(default = "default_expiry_warning_days")]
     pub expiry_warning_days: i64,
 }
@@ -119,6 +134,11 @@ impl Default for LimitsConfig {
         Self {
             max_body_bytes: default_max_body_bytes(),
             upstream_timeout_seconds: default_upstream_timeout_seconds(),
+            request_timeout_seconds: default_request_timeout_seconds(),
+            tls_handshake_timeout_seconds: default_tls_handshake_timeout_seconds(),
+            max_concurrent_requests: default_max_concurrent_requests(),
+            max_concurrent_connections: default_max_concurrent_connections(),
+            max_requests_per_identity_per_minute: default_max_requests_per_identity_per_minute(),
             expiry_warning_days: default_expiry_warning_days(),
         }
     }
@@ -131,6 +151,8 @@ pub struct ClientTrustConfig {
     pub allowed_identities: Vec<String>,
     #[serde(default)]
     pub trust_anchors: Vec<TrustAnchorConfig>,
+    #[serde(default)]
+    pub denied_certificate_fingerprints_sha256: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -255,6 +277,23 @@ fn validate_common(config: &ConnectorConfig, errors: &mut Vec<String>) {
     if config.limits.upstream_timeout_seconds == 0 {
         errors.push("limits.upstream_timeout_seconds must be greater than zero".to_string());
     }
+    if config.limits.request_timeout_seconds == 0 {
+        errors.push("limits.request_timeout_seconds must be greater than zero".to_string());
+    }
+    if config.limits.tls_handshake_timeout_seconds == 0 {
+        errors.push("limits.tls_handshake_timeout_seconds must be greater than zero".to_string());
+    }
+    if config.limits.max_concurrent_requests == 0 {
+        errors.push("limits.max_concurrent_requests must be greater than zero".to_string());
+    }
+    if config.limits.max_concurrent_connections == 0 {
+        errors.push("limits.max_concurrent_connections must be greater than zero".to_string());
+    }
+    if config.limits.max_requests_per_identity_per_minute == 0 {
+        errors.push(
+            "limits.max_requests_per_identity_per_minute must be greater than zero".to_string(),
+        );
+    }
     match config.audit.hash_secret_env.as_deref() {
         Some(value) if value.trim().is_empty() => {
             errors.push("audit.hash_secret_env must not be empty".to_string());
@@ -369,6 +408,14 @@ fn validate_server(config: &ConnectorConfig, require_env: bool, errors: &mut Vec
     }
     if client_trust.trust_anchors.is_empty() {
         errors.push("client_trust.trust_anchors must not be empty".to_string());
+    }
+    for fingerprint in &client_trust.denied_certificate_fingerprints_sha256 {
+        if !is_sha256_fingerprint(fingerprint) {
+            errors.push(
+                "client_trust.denied_certificate_fingerprints_sha256 contains an invalid SHA-256 fingerprint"
+                    .to_string(),
+            );
+        }
     }
     let mut trust_domains = BTreeSet::new();
     for anchor in &client_trust.trust_anchors {
@@ -557,6 +604,14 @@ pub fn upstream_timeout(config: &ConnectorConfig) -> Duration {
     Duration::from_secs(config.limits.upstream_timeout_seconds)
 }
 
+pub fn request_timeout(config: &ConnectorConfig) -> Duration {
+    Duration::from_secs(config.limits.request_timeout_seconds)
+}
+
+pub fn tls_handshake_timeout(config: &ConnectorConfig) -> Duration {
+    Duration::from_secs(config.limits.tls_handshake_timeout_seconds)
+}
+
 fn validate_identity_files(
     prefix: &str,
     identity: &IdentityFiles,
@@ -565,12 +620,30 @@ fn validate_identity_files(
 ) {
     require_file(&format!("{prefix}.cert"), &identity.cert, errors);
     require_file(&format!("{prefix}.key"), &identity.key, errors);
+    validate_private_key_permissions(prefix, &identity.key, errors);
     if identity.cert.exists() && identity.key.exists() {
         if let Err(err) = validate_leaf_certificate(&identity.cert, &identity.key, usage) {
             errors.push(format!("{prefix}: {err}"));
         }
     }
 }
+
+#[cfg(unix)]
+fn validate_private_key_permissions(prefix: &str, path: &Path, errors: &mut Vec<String>) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    if metadata.permissions().mode() & 0o077 != 0 {
+        errors.push(format!(
+            "{prefix}.key must not be readable or writable by group or others"
+        ));
+    }
+}
+
+#[cfg(not(unix))]
+fn validate_private_key_permissions(_prefix: &str, _path: &Path, _errors: &mut Vec<String>) {}
 
 fn validate_upstream_auth_header_name(name: &str, errors: &mut Vec<String>) {
     let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
@@ -627,6 +700,26 @@ fn default_upstream_timeout_seconds() -> u64 {
     DEFAULT_UPSTREAM_TIMEOUT_SECONDS
 }
 
+fn default_request_timeout_seconds() -> u64 {
+    DEFAULT_REQUEST_TIMEOUT_SECONDS
+}
+
+fn default_tls_handshake_timeout_seconds() -> u64 {
+    DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECONDS
+}
+
+fn default_max_concurrent_requests() -> usize {
+    DEFAULT_MAX_CONCURRENT_REQUESTS
+}
+
+fn default_max_concurrent_connections() -> usize {
+    DEFAULT_MAX_CONCURRENT_CONNECTIONS
+}
+
+fn default_max_requests_per_identity_per_minute() -> u32 {
+    DEFAULT_MAX_REQUESTS_PER_IDENTITY_PER_MINUTE
+}
+
 fn default_expiry_warning_days() -> i64 {
     DEFAULT_EXPIRY_WARNING_DAYS
 }
@@ -652,4 +745,8 @@ where
                 .map_err(|_| serde::de::Error::custom(format!("invalid HTTP method '{value}'")))
         })
         .collect()
+}
+
+fn is_sha256_fingerprint(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }

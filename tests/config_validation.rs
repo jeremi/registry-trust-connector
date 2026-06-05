@@ -3,12 +3,14 @@ use std::path::PathBuf;
 use http::Method;
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    SanType,
 };
 use registry_trust_connector::config::{
     validate_config, AuditConfig, ClientServerConfig, ClientTrustConfig, ConnectorConfig,
     DefaultsConfig, IdentityFiles, LimitsConfig, ListenConfig, Mode, RouteConfig,
     TrustAnchorConfig, UpstreamConfig,
 };
+use registry_trust_connector::identity::extract_peer_identity_from_der;
 use tempfile::TempDir;
 use url::Url;
 
@@ -97,6 +99,7 @@ fn server_config() -> ConnectorConfig {
                 trust_domain: "other.example".to_string(),
                 dns_identities: Vec::new(),
             }],
+            denied_certificate_fingerprints_sha256: Vec::new(),
         }),
         upstream: Some(UpstreamConfig {
             base_url: Url::parse("http://127.0.0.1:9000").expect("upstream url"),
@@ -413,6 +416,39 @@ fn config_rejects_zero_upstream_timeout() {
 }
 
 #[test]
+fn config_rejects_zero_inbound_runtime_limits() {
+    let mut config = client_config();
+    config.limits.request_timeout_seconds = 0;
+    config.limits.tls_handshake_timeout_seconds = 0;
+    config.limits.max_concurrent_requests = 0;
+    config.limits.max_concurrent_connections = 0;
+    config.limits.max_requests_per_identity_per_minute = 0;
+
+    let errors = validation_errors(&config, Mode::Client);
+
+    assert_error_contains(
+        &errors,
+        "limits.request_timeout_seconds must be greater than zero",
+    );
+    assert_error_contains(
+        &errors,
+        "limits.tls_handshake_timeout_seconds must be greater than zero",
+    );
+    assert_error_contains(
+        &errors,
+        "limits.max_concurrent_requests must be greater than zero",
+    );
+    assert_error_contains(
+        &errors,
+        "limits.max_concurrent_connections must be greater than zero",
+    );
+    assert_error_contains(
+        &errors,
+        "limits.max_requests_per_identity_per_minute must be greater than zero",
+    );
+}
+
+#[test]
 fn server_config_rejects_empty_upstream_auth_env_names() {
     let mut config = server_config();
     config.routes = vec![server_route(
@@ -457,6 +493,23 @@ fn server_config_rejects_dns_identity_without_bound_trust_anchor() {
     assert_error_contains(
         &errors,
         "DNS client identity 'benefits-client.example.test' must be bound to at least one client_trust.trust_anchors[].dns_identities entry",
+    );
+}
+
+#[test]
+fn server_config_rejects_invalid_revoked_certificate_fingerprints() {
+    let mut config = server_config();
+    config
+        .client_trust
+        .as_mut()
+        .expect("client trust")
+        .denied_certificate_fingerprints_sha256 = vec!["not-a-sha256".to_string()];
+
+    let errors = validation_errors(&config, Mode::Server);
+
+    assert_error_contains(
+        &errors,
+        "client_trust.denied_certificate_fingerprints_sha256 contains an invalid SHA-256 fingerprint",
     );
 }
 
@@ -594,6 +647,60 @@ fn server_validation_rejects_leaf_certificate_without_server_auth_eku() {
     assert_error_contains(
         &errors,
         "leaf certificate must assert Extended Key Usage serverAuth",
+    );
+}
+
+#[test]
+fn identity_extraction_rejects_non_spiffe_uri_san_even_with_dns_fallback_enabled() {
+    let key = KeyPair::generate().expect("key");
+    let mut params = CertificateParams::new(Vec::new()).expect("certificate params");
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    params.subject_alt_names.push(SanType::URI(
+        "urn:example:client".try_into().expect("URI SAN"),
+    ));
+    let cert = params.self_signed(&key).expect("certificate");
+
+    let err = extract_peer_identity_from_der(cert.der().as_ref(), true)
+        .expect_err("non-SPIFFE URI SAN must not become a peer identity");
+
+    assert!(
+        err.contains("acceptable URI SAN identity"),
+        "unexpected error: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn validation_rejects_group_or_world_readable_private_keys() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().expect("temp dir");
+    let key = KeyPair::generate().expect("key");
+    let mut params = CertificateParams::new(vec!["client.example.test".to_string()])
+        .expect("certificate params");
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let cert = params.self_signed(&key).expect("certificate");
+    let cert_path = temp.path().join("client.pem");
+    let key_path = temp.path().join("client.key");
+    let ca_path = temp.path().join("server-ca.pem");
+    std::fs::write(&cert_path, cert.pem()).expect("write cert");
+    std::fs::write(&key_path, key.serialize_pem()).expect("write key");
+    std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644))
+        .expect("key permissions");
+    std::fs::write(&ca_path, cert.pem()).expect("write trust bundle placeholder");
+
+    let mut config = client_config();
+    config.server.as_mut().expect("server config").trust_bundle = ca_path;
+    config.client_identity = Some(IdentityFiles {
+        cert: cert_path,
+        key: key_path,
+    });
+
+    let errors = validation_errors(&config, Mode::Client);
+
+    assert_error_contains(
+        &errors,
+        "client_identity.key must not be readable or writable by group or others",
     );
 }
 

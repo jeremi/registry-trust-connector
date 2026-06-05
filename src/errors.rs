@@ -12,6 +12,8 @@ pub enum ConnectorProblem {
     UpstreamAuthMissing,
     UpstreamUnavailable,
     BodyTooLarge,
+    RequestTimeout,
+    RateLimited,
 }
 
 impl ConnectorProblem {
@@ -26,6 +28,8 @@ impl ConnectorProblem {
             Self::UpstreamAuthMissing => "connector.upstream_auth_missing",
             Self::UpstreamUnavailable => "connector.upstream_unavailable",
             Self::BodyTooLarge => "connector.body_too_large",
+            Self::RequestTimeout => "connector.request_timeout",
+            Self::RateLimited => "connector.rate_limited",
         }
     }
 
@@ -40,6 +44,8 @@ impl ConnectorProblem {
             Self::UpstreamAuthMissing => StatusCode::INTERNAL_SERVER_ERROR,
             Self::UpstreamUnavailable => StatusCode::BAD_GATEWAY,
             Self::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
+            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
         }
     }
 
@@ -54,6 +60,8 @@ impl ConnectorProblem {
             Self::UpstreamAuthMissing => "Upstream authentication is unavailable",
             Self::UpstreamUnavailable => "Upstream is unavailable",
             Self::BodyTooLarge => "Request body is too large",
+            Self::RequestTimeout => "Request timed out",
+            Self::RateLimited => "Request rate limit exceeded",
         }
     }
 

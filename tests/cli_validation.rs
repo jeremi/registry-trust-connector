@@ -229,6 +229,8 @@ fn write_test_pki(root: &Path) -> TestPki {
     fs::write(&server_key_path, server_key.serialize_pem()).expect("write server key");
     fs::write(&client_cert_path, client_cert.pem()).expect("write client cert");
     fs::write(&client_key_path, client_key.serialize_pem()).expect("write client key");
+    secure_key_file(&server_key_path);
+    secure_key_file(&client_key_path);
 
     TestPki {
         ca_cert: ca_cert_path,
@@ -238,6 +240,16 @@ fn write_test_pki(root: &Path) -> TestPki {
         client_key: client_key_path,
     }
 }
+
+#[cfg(unix)]
+fn secure_key_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("key permissions");
+}
+
+#[cfg(not(unix))]
+fn secure_key_file(_path: &Path) {}
 
 fn test_ca() -> (Certificate, KeyPair) {
     let mut params = CertificateParams::new(Vec::new()).expect("CA params");

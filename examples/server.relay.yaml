@@ -10,6 +10,7 @@ server_identity:
 client_trust:
   allowed_identities:
     - "spiffe://openspp.example.test/client/local"
+  denied_certificate_fingerprints_sha256: []
   trust_anchors:
     - ca: "examples/certs/openspp-client-ca.pem"
       trust_domain: "openspp.example.test"
@@ -26,6 +27,11 @@ audit:
 limits:
   max_body_bytes: 1048576
   upstream_timeout_seconds: 30
+  request_timeout_seconds: 30
+  tls_handshake_timeout_seconds: 10
+  max_concurrent_requests: 1024
+  max_concurrent_connections: 1024
+  max_requests_per_identity_per_minute: 600
   expiry_warning_days: 30
 
 routes:

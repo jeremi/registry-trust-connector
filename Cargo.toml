@@ -30,9 +30,9 @@ serde-saphyr = "0.0.26"
 sha2 = "0.10"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing"] }
-tokio = { version = "1", features = ["rt-multi-thread", "signal", "macros", "net", "fs", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "signal", "macros", "net", "fs", "time", "sync"] }
 tokio-rustls = "0.26"
-tower = { version = "0.5", features = ["util"] }
+tower = { version = "0.5", features = ["limit", "util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }
 ulid = "1"
