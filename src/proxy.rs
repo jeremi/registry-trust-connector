@@ -9,7 +9,11 @@ use axum::http::{HeaderMap, Method, Request, Response, StatusCode};
 use axum::routing::any;
 use axum::Router;
 use bytes::Bytes;
-use registry_platform_httputil::OutboundClientBuilder;
+use registry_platform_audit::AuditKeyHasher;
+use registry_platform_httputil::{
+    filter_proxy_request_headers, filter_proxy_response_headers, read_bounded,
+    OutboundClientBuilder, ProxyHeaderPolicy,
+};
 use ulid::Ulid;
 use url::Url;
 
@@ -31,6 +35,7 @@ pub struct ProxyState {
     mode: Mode,
     client: reqwest::Client,
     server_trust: Option<Arc<ServerTrustPolicy>>,
+    audit_hasher: Option<AuditKeyHasher>,
 }
 
 impl ProxyState {
@@ -40,6 +45,7 @@ impl ProxyState {
             mode: Mode::Client,
             client,
             server_trust: None,
+            audit_hasher: None,
         }
     }
 
@@ -51,6 +57,7 @@ impl ProxyState {
             .build();
         Ok(Self {
             server_trust: Some(Arc::new(ServerTrustPolicy::from_config(&config)?)),
+            audit_hasher: Some(crate::redaction::audit_key_hasher(&config)?),
             config,
             mode: Mode::Server,
             client,
@@ -118,11 +125,7 @@ async fn handle_client(
         .ok_or(ConnectorProblem::ConfigInvalid)?;
     let url = build_url(&server.url, &route_match.upstream_path, query)
         .map_err(|_| ConnectorProblem::ConfigInvalid)?;
-    let mut headers = filtered_headers(
-        &parts.headers,
-        route_match.route.allow_forward_authorization,
-        route_match.route.allow_forward_cookie,
-    );
+    let mut headers = filtered_headers(&parts.headers, &route_match);
     headers.insert(REQUEST_ID, header_value(request_id)?);
     headers.insert(
         CONNECTOR_VERSION,
@@ -134,7 +137,15 @@ async fn handle_client(
     if let Some(purpose) = purpose {
         headers.insert(DATA_PURPOSE, header_value(&purpose)?);
     }
-    send_upstream(&state.client, parts.method, url, headers, body).await
+    send_upstream(
+        &state.client,
+        parts.method,
+        url,
+        headers,
+        body,
+        max_body_bytes(&state.config),
+    )
+    .await
 }
 
 async fn handle_server(
@@ -187,7 +198,10 @@ async fn handle_server(
         .ok_or(ConnectorProblem::ConfigInvalid)?;
     let url = build_url(&upstream.base_url, &route_match.upstream_path, query)
         .map_err(|_| ConnectorProblem::ConfigInvalid)?;
-    let mut headers = filtered_headers(&parts.headers, false, false);
+    let mut headers = filter_proxy_request_headers(
+        &parts.headers,
+        &ProxyHeaderPolicy::strict().strip_private_prefix("x-registry-connector-"),
+    );
     headers.insert(REQUEST_ID, header_value(request_id)?);
     let auth_value = upstream_auth_header(&state.config, &route_match)?;
     headers.insert(
@@ -200,12 +214,23 @@ async fn handle_server(
     }
     tracing::info!(
         route_id = %route_match.route.id,
-        client_identity_hash = %crate::redaction::hash_for_log(&identity.value),
+        client_identity_hash = %crate::redaction::identity_hash_for_log(
+            state.audit_hasher.as_ref().ok_or(ConnectorProblem::ConfigInvalid)?,
+            &identity.value,
+        ),
         client_cert_hash = %identity.fingerprint_sha256,
         request_id = %request_id,
         "server connector authorized request"
     );
-    send_upstream(&state.client, parts.method, url, headers, body).await
+    send_upstream(
+        &state.client,
+        parts.method,
+        url,
+        headers,
+        body,
+        max_body_bytes(&state.config),
+    )
+    .await
 }
 
 fn resolve_client_purpose(
@@ -305,6 +330,7 @@ async fn send_upstream(
     url: Url,
     headers: HeaderMap,
     body: Bytes,
+    max_body_bytes: usize,
 ) -> Result<Response<Body>, ConnectorProblem> {
     let reqwest_method = reqwest::Method::from_bytes(method.as_str().as_bytes())
         .map_err(|_| ConnectorProblem::ConfigInvalid)?;
@@ -321,14 +347,11 @@ async fn send_upstream(
     let status = StatusCode::from_u16(response.status().as_u16())
         .map_err(|_| ConnectorProblem::UpstreamUnavailable)?;
     let mut builder = Response::builder().status(status);
-    let connection_tokens = connection_header_tokens(response.headers());
-    for (name, value) in response.headers() {
-        if should_forward_response_header(name, &connection_tokens) {
-            builder = builder.header(name, value);
-        }
+    let response_headers = filter_proxy_response_headers(response.headers());
+    for (name, value) in &response_headers {
+        builder = builder.header(name, value);
     }
-    let body = response
-        .bytes()
+    let body = read_bounded(response, max_body_bytes as u64)
         .await
         .map_err(|_| ConnectorProblem::UpstreamUnavailable)?;
     builder
@@ -336,56 +359,12 @@ async fn send_upstream(
         .map_err(|_| ConnectorProblem::UpstreamUnavailable)
 }
 
-fn filtered_headers(headers: &HeaderMap, allow_auth: bool, allow_cookie: bool) -> HeaderMap {
-    let mut out = HeaderMap::new();
-    let connection_tokens = connection_header_tokens(headers);
-    for (name, value) in headers {
-        if is_hop_by_hop(name)
-            || connection_tokens.iter().any(|token| token == name)
-            || is_connector_private(name)
-        {
-            continue;
-        }
-        if !allow_auth && name == http::header::AUTHORIZATION {
-            continue;
-        }
-        if !allow_cookie && name == http::header::COOKIE {
-            continue;
-        }
-        out.append(name.clone(), value.clone());
-    }
-    out
-}
-
-fn should_forward_response_header(name: &HeaderName, connection_tokens: &[HeaderName]) -> bool {
-    !is_hop_by_hop(name) && !connection_tokens.iter().any(|token| token == name)
-}
-
-fn is_hop_by_hop(name: &HeaderName) -> bool {
-    matches!(
-        name.as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-    )
-}
-
-fn is_connector_private(name: &HeaderName) -> bool {
-    name.as_str().starts_with("x-registry-connector-")
-}
-
-fn connection_header_tokens(headers: &HeaderMap) -> Vec<HeaderName> {
-    headers
-        .get_all(http::header::CONNECTION)
-        .iter()
-        .flat_map(|value| value.to_str().unwrap_or("").split(','))
-        .filter_map(|token| HeaderName::from_bytes(token.trim().as_bytes()).ok())
-        .collect()
+fn filtered_headers(headers: &HeaderMap, route_match: &RouteMatch<'_>) -> HeaderMap {
+    let policy = ProxyHeaderPolicy::strict()
+        .allow_authorization(route_match.route.allow_forward_authorization)
+        .allow_cookie(route_match.route.allow_forward_cookie)
+        .strip_private_prefix("x-registry-connector-");
+    filter_proxy_request_headers(headers, &policy)
 }
 
 fn request_id(headers: &HeaderMap) -> String {

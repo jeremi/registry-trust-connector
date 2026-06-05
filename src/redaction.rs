@@ -1,9 +1,29 @@
 use http::HeaderMap;
-use sha2::{Digest, Sha256};
+use registry_platform_audit::AuditKeyHasher;
 
-pub fn hash_for_log(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    digest.iter().take(12).map(|b| format!("{b:02x}")).collect()
+use crate::config::ConnectorConfig;
+use crate::errors::ConnectorError;
+
+pub fn audit_key_hasher(config: &ConnectorConfig) -> Result<AuditKeyHasher, ConnectorError> {
+    if let Some(env_var) = config.audit.hash_secret_env.as_deref() {
+        return AuditKeyHasher::from_env(env_var).map_err(|err| {
+            ConnectorError::InvalidConfig(format!("audit hash secret is invalid: {err}"))
+        });
+    }
+    if config.audit.allow_unkeyed_hashing {
+        Ok(AuditKeyHasher::unkeyed_dev_only())
+    } else {
+        Err(ConnectorError::InvalidConfig(
+            "audit.hash_secret_env is required unless audit.allow_unkeyed_hashing is true"
+                .to_string(),
+        ))
+    }
+}
+
+pub fn identity_hash_for_log(hasher: &AuditKeyHasher, value: &str) -> String {
+    hasher
+        .audit_reference_hash("registry-trust-connector-client-identity-v1", "", value)
+        .expect("identity log hash class and canonical input are non-empty")
 }
 
 pub fn sanitized_path(path: &str) -> &str {

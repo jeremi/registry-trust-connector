@@ -19,8 +19,9 @@ use rcgen::{
     KeyPair, KeyUsagePurpose, SanType,
 };
 use registry_trust_connector::config::{
-    ClientServerConfig, ClientTrustConfig, ConnectorConfig, DefaultsConfig, IdentityFiles,
-    LimitsConfig, ListenConfig, PurposeSource, RouteConfig, TrustAnchorConfig, UpstreamConfig,
+    AuditConfig, ClientServerConfig, ClientTrustConfig, ConnectorConfig, DefaultsConfig,
+    IdentityFiles, LimitsConfig, ListenConfig, PurposeSource, RouteConfig, TrustAnchorConfig,
+    UpstreamConfig,
 };
 use registry_trust_connector::proxy::{router, ProxyState};
 use registry_trust_connector::tls::{self, PeerCertificateChain};
@@ -135,7 +136,7 @@ async fn client_and_server_connectors_forward_over_mtls_and_deny_missing_purpose
     let too_large = local
         .post(format!("http://{client_addr}/relay/social/records"))
         .header("data-purpose", PURPOSE)
-        .body("0123456789abcdefghi")
+        .body("x".repeat(300))
         .send()
         .await
         .expect("oversized local client request");
@@ -152,7 +153,7 @@ async fn client_and_server_connectors_forward_over_mtls_and_deny_missing_purpose
             server_addr.port()
         ))
         .header("data-purpose", PURPOSE)
-        .body("0123456789abcdefghi")
+        .body("x".repeat(300))
         .send()
         .await
         .expect("direct oversized server connector request");
@@ -440,8 +441,12 @@ fn client_config(certs: &TestPki, server_addr: SocketAddr) -> ConnectorConfig {
         defaults: DefaultsConfig {
             data_purpose: Some(PURPOSE.to_string()),
         },
+        audit: AuditConfig {
+            hash_secret_env: None,
+            allow_unkeyed_hashing: true,
+        },
         limits: LimitsConfig {
-            max_body_bytes: 16,
+            max_body_bytes: 256,
             ..LimitsConfig::default()
         },
         routes: vec![
@@ -489,8 +494,12 @@ fn server_config(certs: &TestPki, upstream: &Url) -> ConnectorConfig {
         server: None,
         client_identity: None,
         defaults: DefaultsConfig::default(),
+        audit: AuditConfig {
+            hash_secret_env: None,
+            allow_unkeyed_hashing: true,
+        },
         limits: LimitsConfig {
-            max_body_bytes: 16,
+            max_body_bytes: 256,
             ..LimitsConfig::default()
         },
         routes: vec![RouteConfig {

@@ -36,6 +36,10 @@ The mock Relay never receives real secrets. It reports whether an
 `Authorization` header was present and which auth scheme was used, but it does
 not echo token values.
 
+The example connector configs set `audit.allow_unkeyed_hashing: true` so the
+demo can run without a secret manager. Replace that with `audit.hash_secret_env`
+before using the topology outside local development.
+
 ## Run the automated demo
 
 ```sh

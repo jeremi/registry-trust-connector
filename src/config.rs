@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use http::header::HeaderName;
 use http::Method;
+use registry_platform_audit::AuditKeyHasher;
 use serde::{Deserialize, Deserializer};
 use url::Url;
 
@@ -29,6 +30,8 @@ pub struct ConnectorConfig {
     pub client_identity: Option<IdentityFiles>,
     #[serde(default)]
     pub defaults: DefaultsConfig,
+    #[serde(default)]
+    pub audit: AuditConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
     #[serde(default)]
@@ -90,6 +93,14 @@ pub struct IdentityFiles {
 #[serde(deny_unknown_fields)]
 pub struct DefaultsConfig {
     pub data_purpose: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditConfig {
+    pub hash_secret_env: Option<String>,
+    #[serde(default)]
+    pub allow_unkeyed_hashing: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -244,6 +255,19 @@ fn validate_common(config: &ConnectorConfig, errors: &mut Vec<String>) {
     if config.limits.upstream_timeout_seconds == 0 {
         errors.push("limits.upstream_timeout_seconds must be greater than zero".to_string());
     }
+    match config.audit.hash_secret_env.as_deref() {
+        Some(value) if value.trim().is_empty() => {
+            errors.push("audit.hash_secret_env must not be empty".to_string());
+        }
+        Some(_) => {}
+        None if !config.audit.allow_unkeyed_hashing => {
+            errors.push(
+                "audit.hash_secret_env is required unless audit.allow_unkeyed_hashing is true"
+                    .to_string(),
+            );
+        }
+        None => {}
+    }
     let mut ids = BTreeSet::new();
     for route in &config.routes {
         if route.id.trim().is_empty() {
@@ -320,7 +344,7 @@ fn validate_client(config: &ConnectorConfig, require_env: bool, errors: &mut Vec
         }
     }
     if require_env {
-        let _ = require_env;
+        require_audit_hash_env(config, errors);
     }
 }
 
@@ -404,6 +428,7 @@ fn validate_server(config: &ConnectorConfig, require_env: bool, errors: &mut Vec
         }
     }
     if require_env {
+        require_audit_hash_env(config, errors);
         let mut required = BTreeSet::new();
         if let Some(var) = upstream.default_auth_header_env.as_deref() {
             required.insert(var.to_string());
@@ -454,6 +479,17 @@ fn validate_server(config: &ConnectorConfig, require_env: bool, errors: &mut Vec
                 route.id, identity
             ));
         }
+    }
+}
+
+fn require_audit_hash_env(config: &ConnectorConfig, errors: &mut Vec<String>) {
+    let Some(var) = config.audit.hash_secret_env.as_deref() else {
+        return;
+    };
+    if let Err(err) = AuditKeyHasher::from_env(var) {
+        errors.push(format!(
+            "required audit hash env var '{var}' is invalid: {err}"
+        ));
     }
 }
 

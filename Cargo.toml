@@ -18,6 +18,7 @@ hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 percent-encoding = "2"
 registry-platform-httpsec = { version = "0.1.2", path = "../registry-platform/crates/registry-platform-httpsec" }
+registry-platform-audit = { version = "0.1.2", path = "../registry-platform/crates/registry-platform-audit" }
 registry-platform-httputil = { version = "0.1.2", path = "../registry-platform/crates/registry-platform-httputil" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 rustls = "0.23"

@@ -14,8 +14,8 @@ use rcgen::{
     KeyPair, KeyUsagePurpose, SanType,
 };
 use registry_trust_connector::config::{
-    upstream_timeout, ClientServerConfig, ClientTrustConfig, ConnectorConfig, DefaultsConfig,
-    LimitsConfig, ListenConfig, RouteConfig, TrustAnchorConfig, UpstreamConfig,
+    upstream_timeout, AuditConfig, ClientServerConfig, ClientTrustConfig, ConnectorConfig,
+    DefaultsConfig, LimitsConfig, ListenConfig, RouteConfig, TrustAnchorConfig, UpstreamConfig,
 };
 use registry_trust_connector::proxy::{router, ProxyState};
 use registry_trust_connector::tls::PeerCertificateChain;
@@ -209,6 +209,33 @@ async fn upstream_timeout_returns_problem_with_stable_code() {
 }
 
 #[tokio::test]
+async fn oversized_upstream_response_returns_bad_gateway_problem() {
+    let (upstream, _received) =
+        start_upstream(upstream_response(StatusCode::OK, vec![], "123456")).await;
+    let mut config = client_config(upstream, route("/local", "/upstream", false, false));
+    config.limits.max_body_bytes = 5;
+    let app = client_app(config);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/local/records")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("proxy response");
+
+    assert_problem(
+        response,
+        StatusCode::BAD_GATEWAY,
+        "connector.upstream_unavailable",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn missing_upstream_auth_env_returns_problem_with_stable_code() {
     std::env::remove_var("REGISTRY_PROXY_POLICY_MISSING_TOKEN");
     let temp = TempDir::new().expect("temp dir");
@@ -298,6 +325,10 @@ fn client_config(upstream: Url, route: RouteConfig) -> ConnectorConfig {
         }),
         client_identity: None,
         defaults: DefaultsConfig::default(),
+        audit: AuditConfig {
+            hash_secret_env: None,
+            allow_unkeyed_hashing: true,
+        },
         limits: LimitsConfig::default(),
         routes: vec![route],
         server_identity: None,
@@ -315,6 +346,10 @@ fn server_config(certs: &TestPki, upstream: Url) -> ConnectorConfig {
         server: None,
         client_identity: None,
         defaults: DefaultsConfig::default(),
+        audit: AuditConfig {
+            hash_secret_env: None,
+            allow_unkeyed_hashing: true,
+        },
         limits: LimitsConfig::default(),
         routes: vec![RouteConfig {
             id: "server-route".to_string(),

@@ -20,6 +20,9 @@ upstream:
   auth_header_name: "Authorization"
   auth_header_scheme: "Bearer"
 
+audit:
+  allow_unkeyed_hashing: true
+
 limits:
   max_body_bytes: 1048576
   upstream_timeout_seconds: 30

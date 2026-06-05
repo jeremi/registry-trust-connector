@@ -254,6 +254,8 @@ server:
 client_identity:
   cert: "{}"
   key: "{}"
+audit:
+  allow_unkeyed_hashing: true
 routes:
   - id: "packages"
     methods: ["GET"]
@@ -286,6 +288,8 @@ client_trust:
 upstream:
   base_url: "http://127.0.0.1:9000"
 {default_auth_header_env}
+audit:
+  allow_unkeyed_hashing: true
 routes:
   - id: "packages"
     methods: ["GET"]

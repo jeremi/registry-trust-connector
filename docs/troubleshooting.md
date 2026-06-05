@@ -42,6 +42,9 @@ Resolution:
 
 3. Compare the failing field with
    [Configuration reference](configuration-reference.md).
+4. For shared and production environments, set `audit.hash_secret_env` and
+   export a secret of at least 32 bytes. Use `audit.allow_unkeyed_hashing: true`
+   only in local demo configs.
 
 ## Client mode refuses to bind
 
@@ -152,14 +155,17 @@ Resolution:
 Symptom: a request returns HTTP 502 with
 `code: connector.upstream_unavailable`.
 
-Cause: the private Relay upstream is unreachable, timed out, or returned a
-response body the connector could not read.
+Cause: the private Relay upstream is unreachable, timed out, returned a
+response body over `limits.max_body_bytes`, or returned a response body the
+connector could not read.
 
 Resolution:
 
 1. Confirm `upstream.base_url` is reachable from the server connector.
 2. Confirm the mock Relay or private Relay process is running.
-3. Increase `limits.upstream_timeout_seconds` only when the upstream normally
+3. Check whether the upstream response body is larger than
+   `limits.max_body_bytes`.
+4. Increase `limits.upstream_timeout_seconds` only when the upstream normally
    takes longer than the current timeout.
 
 ## `connector.body_too_large`

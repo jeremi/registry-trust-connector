@@ -5,9 +5,9 @@ use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
 };
 use registry_trust_connector::config::{
-    validate_config, ClientServerConfig, ClientTrustConfig, ConnectorConfig, DefaultsConfig,
-    IdentityFiles, LimitsConfig, ListenConfig, Mode, RouteConfig, TrustAnchorConfig,
-    UpstreamConfig,
+    validate_config, AuditConfig, ClientServerConfig, ClientTrustConfig, ConnectorConfig,
+    DefaultsConfig, IdentityFiles, LimitsConfig, ListenConfig, Mode, RouteConfig,
+    TrustAnchorConfig, UpstreamConfig,
 };
 use tempfile::TempDir;
 use url::Url;
@@ -62,6 +62,10 @@ fn client_config() -> ConnectorConfig {
         }),
         client_identity: Some(identity("missing-client.crt", "missing-client.key")),
         defaults: DefaultsConfig::default(),
+        audit: AuditConfig {
+            hash_secret_env: None,
+            allow_unkeyed_hashing: true,
+        },
         limits: LimitsConfig::default(),
         routes: vec![client_route("packages")],
         server_identity: None,
@@ -79,6 +83,10 @@ fn server_config() -> ConnectorConfig {
         server: None,
         client_identity: None,
         defaults: DefaultsConfig::default(),
+        audit: AuditConfig {
+            hash_secret_env: None,
+            allow_unkeyed_hashing: true,
+        },
         limits: LimitsConfig::default(),
         routes: vec![server_route("packages", None)],
         server_identity: Some(identity("missing-server.crt", "missing-server.key")),
@@ -111,6 +119,52 @@ fn assert_error_contains(errors: &[String], needle: &str) {
         errors.iter().any(|err| err.contains(needle)),
         "expected an error containing {needle:?}, got {errors:#?}"
     );
+}
+
+#[test]
+fn audit_hash_policy_requires_secret_env_or_explicit_unkeyed_dev_mode() {
+    let mut config = client_config();
+    config.audit = AuditConfig::default();
+
+    let errors = validation_errors(&config, Mode::Client);
+
+    assert_error_contains(
+        &errors,
+        "audit.hash_secret_env is required unless audit.allow_unkeyed_hashing is true",
+    );
+}
+
+#[test]
+fn require_env_validates_audit_hash_secret_env() {
+    let env_var = "REGISTRY_TRUST_CONNECTOR_TEST_AUDIT_HASH_SECRET_MISSING";
+    std::env::remove_var(env_var);
+    let mut config = server_config();
+    config.audit = AuditConfig {
+        hash_secret_env: Some(env_var.to_string()),
+        allow_unkeyed_hashing: false,
+    };
+
+    let errors = validate_config(&config, Mode::Server, true).expect_err("config rejected");
+
+    assert_error_contains(&errors, "required audit hash env var");
+    assert_error_contains(&errors, "is invalid");
+}
+
+#[test]
+fn require_env_rejects_short_audit_hash_secret() {
+    let env_var = "REGISTRY_TRUST_CONNECTOR_TEST_AUDIT_HASH_SECRET_SHORT";
+    std::env::set_var(env_var, "too-short");
+    let mut config = server_config();
+    config.audit = AuditConfig {
+        hash_secret_env: Some(env_var.to_string()),
+        allow_unkeyed_hashing: false,
+    };
+
+    let errors = validate_config(&config, Mode::Server, true).expect_err("config rejected");
+
+    assert_error_contains(&errors, "required audit hash env var");
+    assert_error_contains(&errors, "at least 32 bytes");
+    std::env::remove_var(env_var);
 }
 
 #[test]

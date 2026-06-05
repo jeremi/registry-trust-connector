@@ -24,7 +24,8 @@ rejected.
 | `server` | object | None | client | Server connector URL and trust bundle for the mTLS client. |
 | `client_identity` | object | None | client | Client certificate and private key. The certificate must be valid for client authentication. |
 | `defaults` | object | `{}` | client, server | Shared defaults. Currently only `data_purpose`. |
-| `limits` | object | See [limits](#limits) | client, server | Request size, upstream timeout, and certificate expiry warning settings. |
+| `audit` | object | See [audit](#audit) | client, server | Audit hash configuration for logged sensitive identifiers. |
+| `limits` | object | See [limits](#limits) | client, server | Request and upstream response size, upstream timeout, and certificate expiry warning settings. |
 | `routes` | array | Required | client, server | Route policy. The array must not be empty. |
 | `server_identity` | object | None | server | Server certificate and private key. The certificate must be valid for server authentication. |
 | `client_trust` | object | None | server | Client identity allowlist and trust anchors. |
@@ -72,11 +73,23 @@ certificate for server authentication.
 | --- | --- | --- | --- |
 | `data_purpose` | string | None | Static purpose used by client routes with `purpose_source: static_route_default`. |
 
+## Audit
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `hash_secret_env` | string | None | Environment variable that holds the audit HMAC secret for logged identity hashes. With `--require-env`, the secret must be present, non-empty, and at least 32 bytes. |
+| `allow_unkeyed_hashing` | boolean | `false` | Explicit local development fallback that uses unkeyed platform audit hashes. Do not use this in shared or production environments. |
+
+Every config must either set `audit.hash_secret_env` or explicitly set
+`audit.allow_unkeyed_hashing: true`. When `hash_secret_env` is set, the
+connector uses `registry-platform-audit` keyed hashing for logged client
+identity handles.
+
 ## Limits
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `max_body_bytes` | integer | `1048576` | Maximum request body size in bytes. Requests over the limit return `connector.body_too_large`. |
+| `max_body_bytes` | integer | `1048576` | Maximum request body size and upstream response body size in bytes. Requests over the limit return `connector.body_too_large`; oversized upstream responses return `connector.upstream_unavailable`. |
 | `upstream_timeout_seconds` | integer | `30` | Upstream request timeout. The value must be greater than zero. |
 | `expiry_warning_days` | integer | `30` | Certificate expiry warning threshold in days. Negative values are treated as zero for warning calculations. |
 
@@ -165,7 +178,7 @@ Policy denials and upstream failures return problem responses with a stable
 | `connector.purpose_required` | 400 | A required `data-purpose` value was missing or empty. |
 | `connector.purpose_denied` | 403 | The provided `data-purpose` was not allowed for the server route. |
 | `connector.upstream_auth_missing` | 500 | Required upstream auth environment variable was missing or empty. |
-| `connector.upstream_unavailable` | 502 | The connector could not reach the upstream or read its response. |
+| `connector.upstream_unavailable` | 502 | The connector could not reach the upstream, timed out, or the upstream response exceeded `limits.max_body_bytes`. |
 | `connector.body_too_large` | 413 | The request body exceeded `limits.max_body_bytes`. |
 
 ## Example

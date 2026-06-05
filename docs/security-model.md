@@ -81,8 +81,14 @@ request only when the matched route sets
 Both connector modes enforce `limits.max_body_bytes` before forwarding a
 request. Oversized requests return `connector.body_too_large`.
 
-Upstream calls use `limits.upstream_timeout_seconds`. Timeout and connection
-errors return `connector.upstream_unavailable`.
+Upstream response bodies are also read with `limits.max_body_bytes`. Oversized
+upstream responses, timeouts, connection errors, and body read failures return
+`connector.upstream_unavailable`.
+
+Server mode logs verified client identities only as platform audit reference
+hashes. Production configs should set `audit.hash_secret_env` to a secret that
+is at least 32 bytes; `audit.allow_unkeyed_hashing: true` is only for local
+development and demo fixtures.
 
 ## Out of scope
 

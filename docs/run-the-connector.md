@@ -30,6 +30,8 @@ Client validation requires:
 - At least one route with methods, `local_prefix`, and `upstream_prefix`.
 - A static default purpose when a route uses
   `purpose_source: static_route_default`.
+- `audit.hash_secret_env`, or explicit local-only
+  `audit.allow_unkeyed_hashing: true`.
 
 ## Validate a server config
 
@@ -49,6 +51,9 @@ Server validation requires:
 - Route client identities that are present in
   `client_trust.allowed_identities`.
 - Non-empty upstream auth env vars when `--require-env` is set.
+- `audit.hash_secret_env` with a non-empty secret of at least 32 bytes, unless
+  the config explicitly sets `audit.allow_unkeyed_hashing: true` for local
+  development.
 
 ## Run client mode
 
@@ -88,7 +93,8 @@ docker compose --env-file examples/.env -f examples/docker-compose.yml up
 
 The Compose example starts both connector modes and a mock Relay. Replace the
 mock Relay service, development certificates, and dummy token values before
-using the topology outside local development.
+using the topology outside local development. Also replace the demo
+`audit.allow_unkeyed_hashing: true` setting with `audit.hash_secret_env`.
 
 ## Stop Docker Compose
 

@@ -15,6 +15,9 @@ client_identity:
 defaults:
   data_purpose: "https://openspp.example.test/purpose/benefits-eligibility"
 
+audit:
+  allow_unkeyed_hashing: true
+
 limits:
   max_body_bytes: 1048576
   upstream_timeout_seconds: 30
