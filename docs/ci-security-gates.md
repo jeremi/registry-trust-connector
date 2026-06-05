@@ -27,7 +27,8 @@ The `ci` workflow runs these gates on pushes to `main` and on pull requests:
 - Release build: `cargo build --locked`.
 - Example PKI generation and config validation for client and server modes.
 - Dependency policy: `cargo deny check`.
-- Advisory scan: `cargo audit --deny warnings --ignore RUSTSEC-2025-0134`.
+- Advisory scan:
+  `cargo audit --db "$RUNNER_TEMP/cargo-audit-db" --deny warnings --ignore RUSTSEC-2025-0134`.
 - Secret scan: `gitleaks dir --no-banner --redact --verbose --timeout 120 .`.
 - Docker Compose model validation.
 - Docker image build.

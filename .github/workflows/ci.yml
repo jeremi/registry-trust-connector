@@ -86,7 +86,7 @@ jobs:
       - run: cargo deny check
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
-      - run: cargo audit --deny warnings --ignore RUSTSEC-2025-0134
+      - run: cargo audit --db "$RUNNER_TEMP/cargo-audit-db" --deny warnings --ignore RUSTSEC-2025-0134
 
   secrets:
     runs-on: ubuntu-latest
@@ -125,14 +125,11 @@ jobs:
       - run: cp examples/.env.example examples/.env
       - run: docker compose --env-file examples/.env -f examples/docker-compose.yml config
       - run: docker compose --env-file examples/.env -f examples/docker-compose.yml build
-      - uses: aquasecurity/trivy-action@v0.33.1
-        with:
-          image-ref: registry-trust-connector:dev
-          format: sarif
-          output: trivy-results.sarif
-          severity: CRITICAL,HIGH
-          exit-code: "1"
-      - uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        with:
-          sarif_file: trivy-results.sarif
+      - run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.67.2 image \
+            --scanners vuln \
+            --severity CRITICAL,HIGH \
+            --exit-code 1 \
+            registry-trust-connector:dev
