@@ -125,7 +125,7 @@ jobs:
       - run: cp examples/.env.example examples/.env
       - run: docker compose --env-file examples/.env -f examples/docker-compose.yml config
       - run: docker compose --env-file examples/.env -f examples/docker-compose.yml build
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: registry-trust-connector:dev
           format: sarif
