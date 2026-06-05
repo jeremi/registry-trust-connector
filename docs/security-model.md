@@ -27,6 +27,8 @@ to the server connector with mTLS.
 The server connector is the Relay-side authorization boundary. It accepts only
 client certificates that chain to configured trust anchors and expose an
 allowed identity. It then authorizes the route and purpose before forwarding.
+Operators can also add a leaf certificate SHA-256 fingerprint to
+`client_trust.denied_certificate_fingerprints_sha256` for emergency revocation.
 
 ## Identity binding
 
@@ -87,6 +89,12 @@ Upstream response bodies are also read with `limits.max_body_bytes`. Oversized
 upstream responses, timeouts, connection errors, and body read failures return
 `connector.upstream_unavailable`.
 
+Both connector modes enforce request concurrency and request handling timeouts.
+Server mode also enforces a TLS connection cap, an mTLS handshake timeout, an
+HTTP/1 header read timeout, disabled HTTP/1 keep-alive to avoid retained idle
+connections, and a fixed-window rate limit for each verified client identity
+and route pair.
+
 Server mode logs verified client identities only as platform audit reference
 hashes. Production configs should set `audit.hash_secret_env` to a secret that
 is at least 32 bytes; `audit.allow_unkeyed_hashing: true` is only for local
@@ -95,6 +103,7 @@ development and demo fixtures.
 ## Out of scope
 
 The connector does not replace Relay authorization, database policy, consent
-record storage, audit storage, or certificate lifecycle management. Operators
-still need deployment controls for key storage, certificate issuance,
-certificate rotation, network policy, secret injection, and log retention.
+record storage, audit storage, or full certificate lifecycle management.
+Operators still need deployment controls for key storage, certificate issuance,
+certificate rotation, network policy, secret injection, log retention, and CRL
+or OCSP handling where the deployment requires online revocation checks.

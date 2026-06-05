@@ -26,7 +26,7 @@ client certificate authentication. Client mode disables built-in public roots
 for the server connector call and uses the configured `server.trust_bundle`.
 
 The connector does not define a public certificate authority profile, rotation
-procedure, revocation procedure, or deployment key-management standard.
+procedure, or deployment key-management standard.
 
 ## X.509
 
@@ -41,8 +41,10 @@ Server trust anchors are configured explicitly in
 to a SPIFFE trust domain and, when DNS fallback is enabled, to specific DNS SAN
 identities.
 
-The MVP expects each trust anchor file to contain one CA certificate. It does
-not implement certificate revocation list or Online Certificate Status Protocol
+The MVP expects each trust anchor file to contain one CA certificate. Operators
+can deny a specific leaf certificate by adding its SHA-256 fingerprint to
+`client_trust.denied_certificate_fingerprints_sha256`. The connector does not
+implement certificate revocation list or Online Certificate Status Protocol
 checks.
 
 ## SPIFFE

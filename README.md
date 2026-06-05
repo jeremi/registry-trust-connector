@@ -44,6 +44,7 @@ OpenSPP-style app
 - [Run the connector](docs/run-the-connector.md)
 - [Configuration reference](docs/configuration-reference.md)
 - [Security model](docs/security-model.md)
+- [CI and security gates](docs/ci-security-gates.md)
 - [Standards conformance](docs/standards-conformance.md)
 - [Troubleshooting](docs/troubleshooting.md)
 

@@ -32,6 +32,10 @@ The demo uses two Compose networks:
 - `trust-connector`: connects the client and server connector.
 - `relay-private`: connects only the server connector and mock Relay.
 
+The Compose model binds published ports to `127.0.0.1`, pins the mock Relay
+image by digest, runs services as a non-root UID, drops Linux capabilities,
+sets `no-new-privileges`, uses read-only filesystems, and caps process counts.
+
 The mock Relay never receives real secrets. It reports whether an
 `Authorization` header was present and which auth scheme was used, but it does
 not echo token values.

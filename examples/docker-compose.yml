@@ -6,6 +6,15 @@ services:
       dockerfile: Dockerfile
       additional_contexts:
         registry-platform: ../../registry-platform
+    pull_policy: build
+    init: true
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
     working_dir: /work
     command:
       - client
@@ -23,6 +32,15 @@ services:
   rtc-relay-server:
     image: ${CONNECTOR_IMAGE:-registry-trust-connector:dev}
     build: *connector-build
+    pull_policy: build
+    init: true
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
     working_dir: /work
     command:
       - server
@@ -42,7 +60,15 @@ services:
       - relay-private
 
   registry-relay:
-    image: ${REGISTRY_RELAY_MOCK_IMAGE:-python:3.12-alpine}
+    image: ${REGISTRY_RELAY_MOCK_IMAGE:-python:3.12-alpine@sha256:236173eb74001afe2f60862de935b74fcbd00adfca247b2c27051a70a6a39a2d}
+    init: true
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
     working_dir: /work
     command:
       - python
@@ -51,6 +77,9 @@ services:
       - "8080"
     environment:
       REGISTRY_RELAY_BIND: 0.0.0.0:8080
+      PYTHONDONTWRITEBYTECODE: "1"
+    tmpfs:
+      - /tmp
     volumes:
       - .:/work/examples:ro
     networks:

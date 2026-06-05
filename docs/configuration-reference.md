@@ -25,7 +25,7 @@ rejected.
 | `client_identity` | object | None | client | Client certificate and private key. The certificate must be valid for client authentication. |
 | `defaults` | object | `{}` | client, server | Shared defaults. Currently only `data_purpose`. |
 | `audit` | object | See [audit](#audit) | client, server | Audit hash configuration for logged sensitive identifiers. |
-| `limits` | object | See [limits](#limits) | client, server | Request and upstream response size, upstream timeout, and certificate expiry warning settings. |
+| `limits` | object | See [limits](#limits) | client, server | Request and upstream response size, timeouts, concurrency, basic rate limits, and certificate expiry warning settings. |
 | `routes` | array | Required | client, server | Route policy. The array must not be empty. |
 | `server_identity` | object | None | server | Server certificate and private key. The certificate must be valid for server authentication. |
 | `client_trust` | object | None | server | Client identity allowlist and trust anchors. |
@@ -94,6 +94,12 @@ identity handles.
 | --- | --- | --- | --- |
 | `max_body_bytes` | integer | `1048576` | Maximum request body size and upstream response body size in bytes. Requests over the limit return `connector.body_too_large`; oversized upstream responses return `connector.upstream_unavailable`. |
 | `upstream_timeout_seconds` | integer | `30` | Upstream request timeout. The value must be greater than zero. |
+| `request_timeout_seconds` | integer | `30` | End-to-end connector request handling timeout. Expired requests return `connector.request_timeout`. |
+| `tls_handshake_timeout_seconds` | integer | `10` | Server-mode mTLS handshake timeout. The value must be greater than zero. |
+| `http1_header_read_timeout_seconds` | integer | `10` | Server-mode HTTP/1 header read timeout after mTLS handshake and protocol selection. The value must be greater than zero. |
+| `max_concurrent_requests` | integer | `1024` | Maximum concurrent requests admitted by each connector process. |
+| `max_concurrent_connections` | integer | `1024` | Maximum concurrent server-mode TLS connections admitted by each connector process. Client mode uses request concurrency limiting but still relies on the runtime server accept loop. |
+| `max_requests_per_identity_per_minute` | integer | `600` | Server-mode fixed-window rate limit for each client identity and route pair. Excess requests return `connector.rate_limited`. |
 | `expiry_warning_days` | integer | `30` | Certificate expiry warning threshold in days. Negative values are treated as zero for warning calculations. |
 
 ## Client trust
@@ -104,6 +110,7 @@ Server mode requires `client_trust`:
 | --- | --- | --- | --- |
 | `allowed_identities` | array of strings | Required | Exact client identities allowed to call the server connector. |
 | `trust_anchors` | array of objects | Required | Trust anchors that bind identities to certificate authorities. |
+| `denied_certificate_fingerprints_sha256` | array of strings | `[]` | Emergency denylist of lowercase or uppercase SHA-256 leaf certificate fingerprints. A matching certificate is rejected even when it chains to a trusted anchor. |
 
 Each trust anchor has:
 
@@ -180,6 +187,11 @@ responses to callers.
 Policy denials and upstream failures return problem responses with a stable
 `code` field.
 
+Request completion logs include stable `outcome`, `problem_code`,
+`denial_stage`, and `denial_reason` fields. The connector does not log the raw
+request path in the completion event; it logs path length and whether a query
+string was present.
+
 | Code | HTTP status | Meaning |
 | --- | --- | --- |
 | `connector.config_invalid` | 500 | Runtime config state is invalid. |
@@ -191,6 +203,8 @@ Policy denials and upstream failures return problem responses with a stable
 | `connector.upstream_auth_missing` | 500 | Required upstream auth environment variable was missing or empty. |
 | `connector.upstream_unavailable` | 502 | The connector could not reach the upstream, timed out, or the upstream response exceeded `limits.max_body_bytes`. |
 | `connector.body_too_large` | 413 | The request body exceeded `limits.max_body_bytes`. |
+| `connector.request_timeout` | 408 | Connector request handling exceeded `limits.request_timeout_seconds`. |
+| `connector.rate_limited` | 429 | Server-mode identity and route rate limit was exceeded. |
 
 ## Example
 

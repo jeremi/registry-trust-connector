@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use axum::body::{to_bytes, Body};
@@ -14,10 +16,13 @@ use registry_platform_httputil::{
     filter_proxy_request_headers, filter_proxy_response_headers, read_bounded,
     OutboundClientBuilder, ProxyHeaderPolicy,
 };
+use tower::limit::ConcurrencyLimitLayer;
 use ulid::Ulid;
 use url::Url;
 
-use crate::config::{max_body_bytes, upstream_timeout, ConnectorConfig, Mode, PurposeSource};
+use crate::config::{
+    max_body_bytes, request_timeout, upstream_timeout, ConnectorConfig, Mode, PurposeSource,
+};
 use crate::errors::{ConnectorError, ConnectorProblem};
 use crate::identity::PeerIdentity;
 use crate::routing::{find_client_route, find_server_route, RouteMatch};
@@ -36,6 +41,7 @@ pub struct ProxyState {
     client: reqwest::Client,
     server_trust: Option<Arc<ServerTrustPolicy>>,
     audit_hasher: Option<AuditKeyHasher>,
+    rate_limiter: Arc<RequestRateLimiter>,
 }
 
 impl ProxyState {
@@ -46,6 +52,7 @@ impl ProxyState {
             client,
             server_trust: None,
             audit_hasher: None,
+            rate_limiter: Arc::new(RequestRateLimiter::default()),
         }
     }
 
@@ -61,14 +68,17 @@ impl ProxyState {
             config,
             mode: Mode::Server,
             client,
+            rate_limiter: Arc::new(RequestRateLimiter::default()),
         })
     }
 }
 
 pub fn router(state: ProxyState) -> Router {
+    let max_concurrent_requests = state.config.limits.max_concurrent_requests;
     Router::new()
         .fallback(any(proxy_handler))
         .with_state(Arc::new(state))
+        .layer(ConcurrencyLimitLayer::new(max_concurrent_requests))
 }
 
 async fn proxy_handler(
@@ -80,14 +90,30 @@ async fn proxy_handler(
     let path = request.uri().path().to_string();
     let query = request.uri().query().map(str::to_string);
     let request_id = request_id(request.headers());
-    let result = match state.mode {
-        Mode::Client => {
-            handle_client(state.clone(), request, &path, query.as_deref(), &request_id).await
+    let timeout = request_timeout(&state.config);
+    let result = tokio::time::timeout(timeout, async {
+        match state.mode {
+            Mode::Client => {
+                handle_client(state.clone(), request, &path, query.as_deref(), &request_id).await
+            }
+            Mode::Server => {
+                handle_server(state.clone(), request, &path, query.as_deref(), &request_id).await
+            }
         }
-        Mode::Server => {
-            handle_server(state.clone(), request, &path, query.as_deref(), &request_id).await
-        }
-    };
+    })
+    .await
+    .unwrap_or(Err(ConnectorProblem::RequestTimeout));
+    let problem = result.as_ref().err().copied();
+    let problem_code = problem.map(|problem| problem.code());
+    let outcome = problem
+        .map(ConnectorProblem::audit_outcome)
+        .unwrap_or("forwarded");
+    let denial_stage = problem
+        .and_then(ConnectorProblem::denial_stage)
+        .unwrap_or("");
+    let denial_reason = problem
+        .and_then(ConnectorProblem::denial_reason)
+        .unwrap_or("");
     let response = match result {
         Ok(response) => response,
         Err(problem) => problem.response(),
@@ -96,10 +122,15 @@ async fn proxy_handler(
     tracing::info!(
         mode = ?state.mode,
         method = %method,
-        path = %path,
+        path_len = path.len(),
+        query_present = query.is_some(),
         request_id = %request_id,
         status = status.as_u16(),
         status_class = status.as_u16() / 100,
+        outcome = outcome,
+        problem_code = problem_code.unwrap_or(""),
+        denial_stage = denial_stage,
+        denial_reason = denial_reason,
         latency_ms = started.elapsed().as_millis() as u64,
         "connector request completed"
     );
@@ -189,6 +220,11 @@ async fn handle_server(
     )
     .map_err(|_| ConnectorProblem::RouteDenied)?;
     let authorized_purpose = authorize_server_purpose(&route_match, request.headers())?;
+    state.rate_limiter.check(
+        &identity.value,
+        &route_match.route.id,
+        state.config.limits.max_requests_per_identity_per_minute,
+    )?;
     let (parts, body) = request.into_parts();
     let body = read_limited_body(body, max_body_bytes(&state.config)).await?;
     let upstream = state
@@ -408,6 +444,40 @@ fn valid_request_id(value: &str) -> bool {
 
 fn header_value(value: &str) -> Result<HeaderValue, ConnectorProblem> {
     HeaderValue::from_str(value).map_err(|_| ConnectorProblem::ConfigInvalid)
+}
+
+#[derive(Default)]
+struct RequestRateLimiter {
+    windows: Mutex<BTreeMap<String, RateWindow>>,
+}
+
+struct RateWindow {
+    started: Instant,
+    count: u32,
+}
+
+impl RequestRateLimiter {
+    fn check(&self, identity: &str, route_id: &str, limit: u32) -> Result<(), ConnectorProblem> {
+        let now = Instant::now();
+        let mut windows = self
+            .windows
+            .lock()
+            .map_err(|_| ConnectorProblem::ConfigInvalid)?;
+        let key = format!("{identity}\0{route_id}");
+        let window = windows.entry(key).or_insert(RateWindow {
+            started: now,
+            count: 0,
+        });
+        if now.duration_since(window.started).as_secs() >= 60 {
+            window.started = now;
+            window.count = 0;
+        }
+        if window.count >= limit {
+            return Err(ConnectorProblem::RateLimited);
+        }
+        window.count += 1;
+        Ok(())
+    }
 }
 
 fn build_url(base: &Url, path: &str, query: Option<&str>) -> Result<Url, url::ParseError> {

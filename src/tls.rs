@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Once;
@@ -6,7 +6,6 @@ use std::sync::Once;
 use rustls::pki_types::{CertificateDer, UnixTime};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
-use zeroize::Zeroize;
 
 use crate::config::{dns_identity_map, trust_domain_map, ConnectorConfig, IdentityFiles};
 use crate::errors::ConnectorError;
@@ -23,6 +22,7 @@ pub struct PeerCertificateChain(pub Vec<CertificateDer<'static>>);
 pub struct ServerTrustPolicy {
     anchors_by_domain: BTreeMap<String, Arc<RootCertStore>>,
     anchors_by_dns_identity: BTreeMap<String, Arc<RootCertStore>>,
+    denied_certificate_fingerprints_sha256: BTreeSet<String>,
     allow_dns_san_identity: bool,
 }
 
@@ -36,9 +36,21 @@ impl ServerTrustPolicy {
         for (identity, paths) in dns_identity_map(config) {
             anchors_by_dns_identity.insert(identity, Arc::new(root_store_from_paths(&paths)?));
         }
+        let denied_certificate_fingerprints_sha256 = config
+            .client_trust
+            .as_ref()
+            .map(|trust| {
+                trust
+                    .denied_certificate_fingerprints_sha256
+                    .iter()
+                    .map(|fingerprint| fingerprint.to_ascii_lowercase())
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(Self {
             anchors_by_domain,
             anchors_by_dns_identity,
+            denied_certificate_fingerprints_sha256,
             allow_dns_san_identity: config.allow_dns_san_identity,
         })
     }
@@ -49,6 +61,12 @@ impl ServerTrustPolicy {
             .first()
             .ok_or_else(|| "peer did not present a certificate".to_string())?;
         let identity = extract_peer_identity_from_der(leaf.as_ref(), self.allow_dns_san_identity)?;
+        if self
+            .denied_certificate_fingerprints_sha256
+            .contains(&identity.fingerprint_sha256)
+        {
+            return Err("peer certificate fingerprint is denied".to_string());
+        }
         if let Some(domain) = spiffe_trust_domain(&identity.value) {
             let roots = self
                 .anchors_by_domain
@@ -105,10 +123,9 @@ pub fn reqwest_mtls_client(
     trust_bundle: &Path,
     timeout: std::time::Duration,
 ) -> Result<reqwest::Client, ConnectorError> {
-    let mut pem = crate::identity::read_identity_pem(&identity.cert, &identity.key)
+    let pem = crate::identity::read_identity_pem(&identity.cert, &identity.key)
         .map_err(ConnectorError::Tls)?;
     let identity_result = reqwest::Identity::from_pem(&pem);
-    pem.zeroize();
     let identity = identity_result.map_err(|err| {
         ConnectorError::Tls(format!("failed to load client identity for reqwest: {err}"))
     })?;

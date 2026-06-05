@@ -12,6 +12,8 @@ pub enum ConnectorProblem {
     UpstreamAuthMissing,
     UpstreamUnavailable,
     BodyTooLarge,
+    RequestTimeout,
+    RateLimited,
 }
 
 impl ConnectorProblem {
@@ -26,6 +28,8 @@ impl ConnectorProblem {
             Self::UpstreamAuthMissing => "connector.upstream_auth_missing",
             Self::UpstreamUnavailable => "connector.upstream_unavailable",
             Self::BodyTooLarge => "connector.body_too_large",
+            Self::RequestTimeout => "connector.request_timeout",
+            Self::RateLimited => "connector.rate_limited",
         }
     }
 
@@ -40,6 +44,8 @@ impl ConnectorProblem {
             Self::UpstreamAuthMissing => StatusCode::INTERNAL_SERVER_ERROR,
             Self::UpstreamUnavailable => StatusCode::BAD_GATEWAY,
             Self::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
+            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
         }
     }
 
@@ -54,6 +60,46 @@ impl ConnectorProblem {
             Self::UpstreamAuthMissing => "Upstream authentication is unavailable",
             Self::UpstreamUnavailable => "Upstream is unavailable",
             Self::BodyTooLarge => "Request body is too large",
+            Self::RequestTimeout => "Request timed out",
+            Self::RateLimited => "Request rate limit exceeded",
+        }
+    }
+
+    pub fn audit_outcome(self) -> &'static str {
+        if self.status().is_server_error() {
+            "failed"
+        } else {
+            "denied"
+        }
+    }
+
+    pub fn denial_stage(self) -> Option<&'static str> {
+        match self {
+            Self::ConfigInvalid => None,
+            Self::ClientIdentityMissing | Self::ClientIdentityDenied => Some("identity"),
+            Self::RouteDenied => Some("route"),
+            Self::PurposeRequired | Self::PurposeDenied => Some("purpose"),
+            Self::UpstreamAuthMissing => None,
+            Self::UpstreamUnavailable => None,
+            Self::BodyTooLarge => Some("request_body"),
+            Self::RequestTimeout => Some("request_timeout"),
+            Self::RateLimited => Some("rate_limit"),
+        }
+    }
+
+    pub fn denial_reason(self) -> Option<&'static str> {
+        match self {
+            Self::ConfigInvalid => None,
+            Self::ClientIdentityMissing => Some("client_identity_missing"),
+            Self::ClientIdentityDenied => Some("client_identity_denied"),
+            Self::RouteDenied => Some("route_denied"),
+            Self::PurposeRequired => Some("purpose_required"),
+            Self::PurposeDenied => Some("purpose_denied"),
+            Self::UpstreamAuthMissing => None,
+            Self::UpstreamUnavailable => None,
+            Self::BodyTooLarge => Some("body_too_large"),
+            Self::RequestTimeout => Some("request_timeout"),
+            Self::RateLimited => Some("rate_limited"),
         }
     }
 

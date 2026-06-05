@@ -534,6 +534,7 @@ fn server_config(certs: &TestPki, upstream: &Url) -> ConnectorConfig {
                     dns_identities: Vec::new(),
                 },
             ],
+            denied_certificate_fingerprints_sha256: Vec::new(),
         }),
         upstream: Some(UpstreamConfig {
             base_url: upstream.clone(),

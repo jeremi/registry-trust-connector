@@ -9,7 +9,7 @@ use axum::http::{Request, Response, StatusCode};
 use clap::{Parser, Subcommand, ValueEnum};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as HyperBuilder;
 use registry_platform_httpsec::Problem;
 use registry_trust_connector::config::{self, LoadedConfig, Mode};
@@ -18,12 +18,12 @@ use registry_trust_connector::logging::init_tracing;
 use registry_trust_connector::proxy::{router, ProxyState};
 use registry_trust_connector::tls::{self, PeerCertificateChain};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 use tracing::{error, info};
 
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(10);
-const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Registry Trust Connector")]
@@ -144,13 +144,21 @@ async fn run_server(loaded: LoadedConfig) -> Result<(), ConnectorError> {
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
     let app = router(ProxyState::server(Arc::clone(&config))?);
     let listener = TcpListener::bind(bind).await?;
+    let connection_permits = Arc::new(Semaphore::new(config.limits.max_concurrent_connections));
+    let tls_handshake_timeout = config::tls_handshake_timeout(&config);
+    let http1_header_read_timeout = config::http1_header_read_timeout(&config);
     info!(mode = "server", listen = %bind, "registry trust connector listening");
 
     loop {
+        let permit = Arc::clone(&connection_permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| ConnectorError::InvalidConfig("connection limiter closed".to_string()))?;
         let (stream, remote_addr) = match listener.accept().await {
             Ok(conn) => conn,
             Err(err) => {
                 tracing::error!(error = %err, "failed to accept connection");
+                drop(permit);
                 tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
                 continue;
             }
@@ -159,7 +167,7 @@ async fn run_server(loaded: LoadedConfig) -> Result<(), ConnectorError> {
         let app = app.clone();
         tokio::spawn(async move {
             let tls_stream =
-                match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                match tokio::time::timeout(tls_handshake_timeout, acceptor.accept(stream)).await {
                     Ok(Ok(stream)) => stream,
                     Ok(Err(err)) => {
                         tracing::warn!(remote = %remote_addr, error = %err, "TLS handshake failed");
@@ -192,10 +200,16 @@ async fn run_server(loaded: LoadedConfig) -> Result<(), ConnectorError> {
                     Ok::<Response<Body>, Infallible>(response)
                 }
             });
-            let builder = HyperBuilder::new(TokioExecutor::new());
+            let mut builder = HyperBuilder::new(TokioExecutor::new());
+            builder
+                .http1()
+                .timer(TokioTimer::new())
+                .header_read_timeout(http1_header_read_timeout)
+                .keep_alive(false);
             if let Err(err) = builder.serve_connection(io, service).await {
                 tracing::warn!(remote = %remote_addr, error = %err, "connection failed");
             }
+            drop(permit);
         });
     }
 }

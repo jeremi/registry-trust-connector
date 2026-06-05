@@ -17,6 +17,8 @@ use registry_trust_connector::config::{
     upstream_timeout, AuditConfig, ClientServerConfig, ClientTrustConfig, ConnectorConfig,
     DefaultsConfig, LimitsConfig, ListenConfig, RouteConfig, TrustAnchorConfig, UpstreamConfig,
 };
+use registry_trust_connector::errors::ConnectorProblem;
+use registry_trust_connector::identity::sha256_hex;
 use registry_trust_connector::proxy::{router, ProxyState};
 use registry_trust_connector::tls::PeerCertificateChain;
 use tempfile::TempDir;
@@ -27,6 +29,69 @@ use tower::ServiceExt;
 use url::Url;
 
 const CLIENT_IDENTITY: &str = "spiffe://openspp.example/client/benefits-system";
+
+#[test]
+fn connector_problem_audit_dimensions_are_stable() {
+    let cases = [
+        (
+            ConnectorProblem::ClientIdentityMissing,
+            "denied",
+            Some("identity"),
+            Some("client_identity_missing"),
+        ),
+        (
+            ConnectorProblem::ClientIdentityDenied,
+            "denied",
+            Some("identity"),
+            Some("client_identity_denied"),
+        ),
+        (
+            ConnectorProblem::RouteDenied,
+            "denied",
+            Some("route"),
+            Some("route_denied"),
+        ),
+        (
+            ConnectorProblem::PurposeRequired,
+            "denied",
+            Some("purpose"),
+            Some("purpose_required"),
+        ),
+        (
+            ConnectorProblem::PurposeDenied,
+            "denied",
+            Some("purpose"),
+            Some("purpose_denied"),
+        ),
+        (
+            ConnectorProblem::BodyTooLarge,
+            "denied",
+            Some("request_body"),
+            Some("body_too_large"),
+        ),
+        (
+            ConnectorProblem::RequestTimeout,
+            "denied",
+            Some("request_timeout"),
+            Some("request_timeout"),
+        ),
+        (
+            ConnectorProblem::RateLimited,
+            "denied",
+            Some("rate_limit"),
+            Some("rate_limited"),
+        ),
+        (ConnectorProblem::ConfigInvalid, "failed", None, None),
+        (ConnectorProblem::UpstreamAuthMissing, "failed", None, None),
+        (ConnectorProblem::UpstreamUnavailable, "failed", None, None),
+    ];
+
+    for (problem, outcome, stage, reason) in cases {
+        assert_eq!(problem.audit_outcome(), outcome, "{problem:?}");
+        assert_eq!(problem.denial_stage(), stage, "{problem:?}");
+        assert_eq!(problem.denial_reason(), reason, "{problem:?}");
+    }
+}
 
 #[tokio::test]
 async fn default_request_header_policy_strips_sensitive_hop_by_hop_and_connector_headers() {
@@ -397,6 +462,86 @@ async fn empty_upstream_auth_env_returns_problem_with_stable_code() {
     .await;
 }
 
+#[tokio::test]
+async fn server_denies_certificate_fingerprints_in_client_trust_denylist() {
+    std::env::set_var("REGISTRY_PROXY_POLICY_DENYLIST_TOKEN", "relay-token");
+    let temp = TempDir::new().expect("temp dir");
+    let certs = write_test_pki(temp.path());
+    let (upstream, _received) =
+        start_upstream(upstream_response(StatusCode::OK, vec![], "accepted")).await;
+    let mut config = server_config(&certs, upstream);
+    config.routes[0].upstream_auth_header_env =
+        Some("REGISTRY_PROXY_POLICY_DENYLIST_TOKEN".to_string());
+    config
+        .client_trust
+        .as_mut()
+        .expect("client trust")
+        .denied_certificate_fingerprints_sha256 = vec![sha256_hex(certs.client_der.as_ref())];
+    let app = router(ProxyState::server(Arc::new(config)).expect("server proxy state"));
+
+    let mut request = Request::builder()
+        .method(Method::GET)
+        .uri("/upstream/records")
+        .body(Body::empty())
+        .expect("request");
+    request
+        .extensions_mut()
+        .insert(PeerCertificateChain(vec![certs.client_der]));
+
+    let response = app.oneshot(request).await.expect("proxy response");
+
+    assert_problem(
+        response,
+        StatusCode::FORBIDDEN,
+        "connector.client_identity_denied",
+    )
+    .await;
+    std::env::remove_var("REGISTRY_PROXY_POLICY_DENYLIST_TOKEN");
+}
+
+#[tokio::test]
+async fn server_rate_limits_identity_route_pairs() {
+    std::env::set_var("REGISTRY_PROXY_POLICY_RATE_LIMIT_TOKEN", "relay-token");
+    let temp = TempDir::new().expect("temp dir");
+    let certs = write_test_pki(temp.path());
+    let (upstream, _received) =
+        start_upstream(upstream_response(StatusCode::OK, vec![], "accepted")).await;
+    let mut config = server_config(&certs, upstream);
+    config.routes[0].upstream_auth_header_env =
+        Some("REGISTRY_PROXY_POLICY_RATE_LIMIT_TOKEN".to_string());
+    config.limits.max_requests_per_identity_per_minute = 1;
+    let app = router(ProxyState::server(Arc::new(config)).expect("server proxy state"));
+
+    let mut first = Request::builder()
+        .method(Method::GET)
+        .uri("/upstream/records")
+        .body(Body::empty())
+        .expect("request");
+    first
+        .extensions_mut()
+        .insert(PeerCertificateChain(vec![certs.client_der.clone()]));
+    let first_response = app.clone().oneshot(first).await.expect("proxy response");
+    assert_eq!(first_response.status(), StatusCode::OK);
+
+    let mut second = Request::builder()
+        .method(Method::GET)
+        .uri("/upstream/records")
+        .body(Body::empty())
+        .expect("request");
+    second
+        .extensions_mut()
+        .insert(PeerCertificateChain(vec![certs.client_der]));
+    let second_response = app.oneshot(second).await.expect("proxy response");
+
+    assert_problem(
+        second_response,
+        StatusCode::TOO_MANY_REQUESTS,
+        "connector.rate_limited",
+    )
+    .await;
+    std::env::remove_var("REGISTRY_PROXY_POLICY_RATE_LIMIT_TOKEN");
+}
+
 async fn assert_problem(response: Response<Body>, status: StatusCode, code: &str) {
     assert_eq!(response.status(), status);
     assert_eq!(
@@ -479,6 +624,7 @@ fn server_config(certs: &TestPki, upstream: Url) -> ConnectorConfig {
                 trust_domain: "openspp.example".to_string(),
                 dns_identities: Vec::new(),
             }],
+            denied_certificate_fingerprints_sha256: Vec::new(),
         }),
         upstream: Some(UpstreamConfig {
             base_url: upstream,

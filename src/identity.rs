@@ -11,6 +11,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
 use x509_parser::extensions::{ExtendedKeyUsage, GeneralName};
 use x509_parser::prelude::*;
+use zeroize::Zeroizing;
 
 static INSTALL_CRYPTO_PROVIDER: Once = Once::new();
 
@@ -71,8 +72,8 @@ pub fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, String> {
         .ok_or_else(|| "private key PEM did not contain a supported private key".to_string())
 }
 
-pub fn read_identity_pem(cert: &Path, key: &Path) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
+pub fn read_identity_pem(cert: &Path, key: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
+    let mut out = Zeroizing::new(Vec::new());
     File::open(cert)
         .map_err(|err| err.to_string())?
         .read_to_end(&mut out)
@@ -192,11 +193,13 @@ pub fn extract_peer_identity_from_der(
         .ok_or_else(|| "certificate has no subject alternative name".to_string())?;
     for name in &san.value.general_names {
         if let GeneralName::URI(uri) = name {
-            return Ok(PeerIdentity {
-                value: uri.to_string(),
-                kind: IdentityKind::UriSan,
-                fingerprint_sha256,
-            });
+            if uri.starts_with("spiffe://") {
+                return Ok(PeerIdentity {
+                    value: uri.to_string(),
+                    kind: IdentityKind::UriSan,
+                    fingerprint_sha256,
+                });
+            }
         }
     }
     if allow_dns_fallback {
