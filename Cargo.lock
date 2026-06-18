@@ -1418,7 +1418,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "registry-platform-audit"
-version = "0.1.2"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "hmac",
@@ -1435,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "registry-platform-httpsec"
-version = "0.1.2"
+version = "0.3.0"
 dependencies = [
  "axum",
  "http",
@@ -1449,7 +1449,7 @@ dependencies = [
 
 [[package]]
 name = "registry-platform-httputil"
-version = "0.1.2"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "http",
@@ -1457,6 +1457,13 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "registry-platform-pdp"
+version = "0.3.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -1476,6 +1483,7 @@ dependencies = [
  "registry-platform-audit",
  "registry-platform-httpsec",
  "registry-platform-httputil",
+ "registry-platform-pdp",
  "reqwest",
  "rustls",
  "rustls-pemfile",

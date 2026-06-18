@@ -17,9 +17,10 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 percent-encoding = "2"
-registry-platform-httpsec = { version = "0.1.2", path = "../registry-platform/crates/registry-platform-httpsec" }
-registry-platform-audit = { version = "0.1.2", path = "../registry-platform/crates/registry-platform-audit" }
-registry-platform-httputil = { version = "0.1.2", path = "../registry-platform/crates/registry-platform-httputil" }
+registry-platform-httpsec = { version = "0.3.0", path = "../registry-platform/crates/registry-platform-httpsec" }
+registry-platform-audit = { version = "0.3.0", path = "../registry-platform/crates/registry-platform-audit" }
+registry-platform-httputil = { version = "0.3.0", path = "../registry-platform/crates/registry-platform-httputil" }
+registry-platform-pdp = { version = "0.3.0", path = "../registry-platform/crates/registry-platform-pdp" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 rustls = "0.23"
 rustls-pemfile = "2"

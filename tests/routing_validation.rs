@@ -14,8 +14,10 @@ fn route(id: &str, local_prefix: &str, upstream_prefix: &str) -> RouteConfig {
         upstream_auth_header_env: None,
         forward_client_identity_header: false,
         purposes: Vec::new(),
+        governed_policy: None,
         allow_forward_authorization: false,
         allow_forward_cookie: false,
+        policy_hash: Default::default(),
     }
 }
 
@@ -31,8 +33,10 @@ fn server_route(id: &str, upstream_prefix: &str, client_identity: &str) -> Route
         upstream_auth_header_env: None,
         forward_client_identity_header: false,
         purposes: Vec::new(),
+        governed_policy: None,
         allow_forward_authorization: false,
         allow_forward_cookie: false,
+        policy_hash: Default::default(),
     }
 }
 

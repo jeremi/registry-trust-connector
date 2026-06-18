@@ -7,8 +7,8 @@ use rcgen::{
 };
 use registry_trust_connector::config::{
     validate_config, AuditConfig, ClientServerConfig, ClientTrustConfig, ConnectorConfig,
-    DefaultsConfig, IdentityFiles, LimitsConfig, ListenConfig, Mode, RouteConfig,
-    TrustAnchorConfig, UpstreamConfig,
+    DefaultsConfig, GovernedRoutePolicyConfig, GovernedTrustedContextConfig, IdentityFiles,
+    LimitsConfig, ListenConfig, Mode, RouteConfig, TrustAnchorConfig, UpstreamConfig,
 };
 use registry_trust_connector::identity::extract_peer_identity_from_der;
 use tempfile::TempDir;
@@ -33,8 +33,10 @@ fn client_route(id: &str) -> RouteConfig {
         upstream_auth_header_env: None,
         forward_client_identity_header: false,
         purposes: Vec::new(),
+        governed_policy: None,
         allow_forward_authorization: false,
         allow_forward_cookie: false,
+        policy_hash: Default::default(),
     }
 }
 
@@ -50,8 +52,10 @@ fn server_route(id: &str, client_identity: Option<&str>) -> RouteConfig {
         upstream_auth_header_env: None,
         forward_client_identity_header: false,
         purposes: Vec::new(),
+        governed_policy: None,
         allow_forward_authorization: false,
         allow_forward_cookie: false,
+        policy_hash: Default::default(),
     }
 }
 
@@ -356,6 +360,61 @@ fn config_rejects_empty_route_purposes() {
     let errors = validation_errors(&config, Mode::Server);
 
     assert_error_contains(&errors, "route 'packages' contains an empty purpose");
+}
+
+#[test]
+fn config_rejects_empty_governed_route_policy_terms() {
+    let mut config = server_config();
+    config.routes = vec![RouteConfig {
+        client_identity: Some("spiffe://client.example/ns/default/sa/relay".to_string()),
+        governed_policy: Some(GovernedRoutePolicyConfig {
+            permitted_purposes: vec![" ".to_string()],
+            permitted_jurisdictions: vec![" ".to_string()],
+            allowed_assurance: vec![" ".to_string()],
+            minimum_assurance: Some(" ".to_string()),
+            max_source_age_seconds: Some(0),
+            redaction_fields: vec![" ".to_string()],
+            unsupported_odrl_terms: vec![" ".to_string()],
+            trusted_context: GovernedTrustedContextConfig {
+                jurisdiction: Some(" ".to_string()),
+                asserted_assurance: Some(" ".to_string()),
+                legal_basis_ref: Some(" ".to_string()),
+                consent_ref: Some(" ".to_string()),
+                source_observed_age_seconds: None,
+            },
+            require_legal_basis: false,
+            require_consent: false,
+        }),
+        ..server_route("packages", None)
+    }];
+    config
+        .client_trust
+        .as_mut()
+        .expect("client trust")
+        .trust_anchors = vec![TrustAnchorConfig {
+        ca: PathBuf::from("missing-client-ca.pem"),
+        trust_domain: "client.example".to_string(),
+        dns_identities: Vec::new(),
+    }];
+
+    let errors = validation_errors(&config, Mode::Server);
+
+    assert_error_contains(
+        &errors,
+        "route 'packages' governed_policy contains an empty permitted_purpose",
+    );
+    assert_error_contains(
+        &errors,
+        "route 'packages' governed_policy max_source_age_seconds must be greater than zero",
+    );
+    assert_error_contains(
+        &errors,
+        "route 'packages' governed_policy contains an empty unsupported_odrl_term",
+    );
+    assert_error_contains(
+        &errors,
+        "route 'packages' governed_policy trusted_context.legal_basis_ref must not be empty",
+    );
 }
 
 #[test]
