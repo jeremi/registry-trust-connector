@@ -372,10 +372,25 @@ fn authorize_server_purpose(
         redaction_fields: governed_policy
             .map(|policy| policy.redaction_fields.iter().cloned().collect())
             .unwrap_or_default(),
-        unsupported_odrl_terms: Vec::new(),
+        unsupported_odrl_terms: governed_policy
+            .map(|policy| policy.unsupported_odrl_terms.clone())
+            .unwrap_or_default(),
     };
     match pdp_decide(&context, &policy) {
-        PdpDecision::Permit(_) | PdpDecision::PermitWithRedaction { .. } => Ok(Some(purpose)),
+        PdpDecision::Permit(_) => Ok(Some(purpose)),
+        PdpDecision::PermitWithRedaction {
+            audit, field_set, ..
+        } => {
+            tracing::info!(
+                route_id = %route_match.route.id,
+                pdp_policy_id = %audit.policy_id,
+                pdp_policy_hash = %audit.policy_hash,
+                pdp_evaluated_rule_ids = ?audit.evaluated_rule_ids,
+                pdp_redaction_fields = ?field_set,
+                "server connector denied pdp redaction decision it cannot enforce"
+            );
+            Err(ConnectorProblem::PurposeDenied)
+        }
         PdpDecision::Deny { audit, .. } => {
             tracing::info!(
                 route_id = %route_match.route.id,
@@ -481,6 +496,13 @@ fn route_purpose_policy_hash(route_match: &RouteMatch<'_>) -> String {
         }
         for field in policy.redaction_fields.iter().collect::<BTreeSet<_>>() {
             push_hash_field(&mut material, "governed_redaction_field", field);
+        }
+        for term in policy
+            .unsupported_odrl_terms
+            .iter()
+            .collect::<BTreeSet<_>>()
+        {
+            push_hash_field(&mut material, "governed_unsupported_odrl_term", term);
         }
         push_hash_field(
             &mut material,
@@ -698,9 +720,16 @@ fn _identity_marker(_: &PeerIdentity) {}
 mod tests {
     use super::*;
     use crate::config::{GovernedRoutePolicyConfig, GovernedTrustedContextConfig, RouteConfig};
+    use std::io::{self, Write};
 
     #[test]
-    fn denied_server_purpose_uses_stable_pdp_audit_provenance() {
+    fn denied_server_purpose_logs_pdp_audit_provenance() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_writer(SharedLogWriter(Arc::clone(&logs)))
+            .finish();
         let route = test_route();
         let route_match = RouteMatch {
             route: &route,
@@ -709,15 +738,21 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(DATA_PURPOSE, HeaderValue::from_static("marketing"));
 
-        assert_eq!(
-            authorize_server_purpose(&route_match, &headers),
-            Err(ConnectorProblem::PurposeDenied)
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(
+                authorize_server_purpose(&route_match, &headers),
+                Err(ConnectorProblem::PurposeDenied)
+            );
+        });
+
+        let logs = String::from_utf8(logs.lock().expect("logs").clone()).expect("utf8 logs");
+        assert!(logs.contains(r#""route_id":"server-route""#), "{logs}");
+        assert!(
+            logs.contains(r#""pdp_policy_id":"trust-connector.route.server-route""#),
+            "{logs}"
         );
-        assert_eq!(
-            route_purpose_policy_hash(&route_match),
-            route_purpose_policy_hash(&route_match)
-        );
-        assert!(route_purpose_policy_hash(&route_match).starts_with("sha256:"));
+        assert!(logs.contains(r#""pdp_policy_hash":"sha256:"#), "{logs}");
+        assert!(logs.contains("route-purpose:server-route"), "{logs}");
     }
 
     #[test]
@@ -797,6 +832,52 @@ mod tests {
     }
 
     #[test]
+    fn governed_route_policy_denies_unsupported_odrl_terms() {
+        let route = RouteConfig {
+            governed_policy: Some(GovernedRoutePolicyConfig {
+                permitted_purposes: vec!["operations".to_string()],
+                unsupported_odrl_terms: vec!["odrl:spatial".to_string()],
+                ..GovernedRoutePolicyConfig::default()
+            }),
+            ..test_route()
+        };
+        let route_match = RouteMatch {
+            route: &route,
+            upstream_path: "/relay/packages/records".to_string(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(DATA_PURPOSE, HeaderValue::from_static("operations"));
+
+        assert_eq!(
+            authorize_server_purpose(&route_match, &headers),
+            Err(ConnectorProblem::PurposeDenied)
+        );
+    }
+
+    #[test]
+    fn governed_route_policy_denies_redaction_decisions_it_cannot_enforce() {
+        let route = RouteConfig {
+            governed_policy: Some(GovernedRoutePolicyConfig {
+                permitted_purposes: vec!["operations".to_string()],
+                redaction_fields: vec!["claims.ssn".to_string()],
+                ..GovernedRoutePolicyConfig::default()
+            }),
+            ..test_route()
+        };
+        let route_match = RouteMatch {
+            route: &route,
+            upstream_path: "/relay/packages/records".to_string(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(DATA_PURPOSE, HeaderValue::from_static("operations"));
+
+        assert_eq!(
+            authorize_server_purpose(&route_match, &headers),
+            Err(ConnectorProblem::PurposeDenied)
+        );
+    }
+
+    #[test]
     fn route_purpose_policy_hash_changes_for_client_identity() {
         let route = test_route();
         let baseline = hash_for_route(&route);
@@ -854,6 +935,21 @@ mod tests {
     }
 
     #[test]
+    fn route_purpose_policy_hash_changes_for_unsupported_odrl_terms() {
+        let route = test_route();
+        let baseline = hash_for_route(&route);
+        let changed = hash_for_route(&RouteConfig {
+            governed_policy: Some(GovernedRoutePolicyConfig {
+                unsupported_odrl_terms: vec!["odrl:spatial".to_string()],
+                ..GovernedRoutePolicyConfig::default()
+            }),
+            ..route
+        });
+
+        assert_ne!(baseline, changed);
+    }
+
+    #[test]
     fn route_purpose_policy_hash_is_stable_for_set_ordering() {
         let route = test_route();
         let reordered = RouteConfig {
@@ -888,6 +984,30 @@ mod tests {
             allow_forward_authorization: false,
             allow_forward_cookie: false,
             policy_hash: Default::default(),
+        }
+    }
+
+    #[derive(Clone)]
+    struct SharedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct SharedLogWriteGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+        type Writer = SharedLogWriteGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriteGuard(Arc::clone(&self.0))
+        }
+    }
+
+    impl Write for SharedLogWriteGuard {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("logs").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
         }
     }
 }

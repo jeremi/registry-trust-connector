@@ -374,6 +374,7 @@ fn config_rejects_empty_governed_route_policy_terms() {
             minimum_assurance: Some(" ".to_string()),
             max_source_age_seconds: Some(0),
             redaction_fields: vec![" ".to_string()],
+            unsupported_odrl_terms: vec![" ".to_string()],
             trusted_context: GovernedTrustedContextConfig {
                 jurisdiction: Some(" ".to_string()),
                 asserted_assurance: Some(" ".to_string()),
@@ -405,6 +406,10 @@ fn config_rejects_empty_governed_route_policy_terms() {
     assert_error_contains(
         &errors,
         "route 'packages' governed_policy max_source_age_seconds must be greater than zero",
+    );
+    assert_error_contains(
+        &errors,
+        "route 'packages' governed_policy contains an empty unsupported_odrl_term",
     );
     assert_error_contains(
         &errors,

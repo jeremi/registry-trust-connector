@@ -263,6 +263,8 @@ pub struct GovernedRoutePolicyConfig {
     #[serde(default)]
     pub redaction_fields: Vec<String>,
     #[serde(default)]
+    pub unsupported_odrl_terms: Vec<String>,
+    #[serde(default)]
     pub trusted_context: GovernedTrustedContextConfig,
 }
 
@@ -459,6 +461,13 @@ fn validate_governed_route_policy(
         if field.trim().is_empty() {
             errors.push(format!(
                 "route '{route_id}' governed_policy contains an empty redaction_field"
+            ));
+        }
+    }
+    for term in &policy.unsupported_odrl_terms {
+        if term.trim().is_empty() {
+            errors.push(format!(
+                "route '{route_id}' governed_policy contains an empty unsupported_odrl_term"
             ));
         }
     }
