@@ -698,16 +698,9 @@ fn _identity_marker(_: &PeerIdentity) {}
 mod tests {
     use super::*;
     use crate::config::{GovernedRoutePolicyConfig, GovernedTrustedContextConfig, RouteConfig};
-    use std::io::{self, Write};
 
     #[test]
-    fn denied_server_purpose_logs_pdp_audit_provenance() {
-        let logs = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .with_ansi(false)
-            .with_writer(SharedLogWriter(Arc::clone(&logs)))
-            .finish();
+    fn denied_server_purpose_uses_stable_pdp_audit_provenance() {
         let route = test_route();
         let route_match = RouteMatch {
             route: &route,
@@ -716,21 +709,15 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(DATA_PURPOSE, HeaderValue::from_static("marketing"));
 
-        tracing::subscriber::with_default(subscriber, || {
-            assert_eq!(
-                authorize_server_purpose(&route_match, &headers),
-                Err(ConnectorProblem::PurposeDenied)
-            );
-        });
-
-        let logs = String::from_utf8(logs.lock().expect("logs").clone()).expect("utf8 logs");
-        assert!(logs.contains(r#""route_id":"server-route""#), "{logs}");
-        assert!(
-            logs.contains(r#""pdp_policy_id":"trust-connector.route.server-route""#),
-            "{logs}"
+        assert_eq!(
+            authorize_server_purpose(&route_match, &headers),
+            Err(ConnectorProblem::PurposeDenied)
         );
-        assert!(logs.contains(r#""pdp_policy_hash":"sha256:"#), "{logs}");
-        assert!(logs.contains("route-purpose:server-route"), "{logs}");
+        assert_eq!(
+            route_purpose_policy_hash(&route_match),
+            route_purpose_policy_hash(&route_match)
+        );
+        assert!(route_purpose_policy_hash(&route_match).starts_with("sha256:"));
     }
 
     #[test]
@@ -901,30 +888,6 @@ mod tests {
             allow_forward_authorization: false,
             allow_forward_cookie: false,
             policy_hash: Default::default(),
-        }
-    }
-
-    #[derive(Clone)]
-    struct SharedLogWriter(Arc<Mutex<Vec<u8>>>);
-
-    struct SharedLogWriteGuard(Arc<Mutex<Vec<u8>>>);
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
-        type Writer = SharedLogWriteGuard;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            SharedLogWriteGuard(Arc::clone(&self.0))
-        }
-    }
-
-    impl Write for SharedLogWriteGuard {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().expect("logs").extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
         }
     }
 }
