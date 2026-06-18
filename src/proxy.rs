@@ -16,6 +16,10 @@ use registry_platform_httputil::{
     filter_proxy_request_headers, filter_proxy_response_headers, read_bounded,
     OutboundClientBuilder, ProxyHeaderPolicy,
 };
+use registry_platform_pdp::{
+    decide as pdp_decide, Decision as PdpDecision, EvidenceRequestContext as PdpRequestContext,
+    PolicyInput as PdpPolicyInput,
+};
 use tower::limit::ConcurrencyLimitLayer;
 use ulid::Ulid;
 use url::Url;
@@ -24,7 +28,7 @@ use crate::config::{
     max_body_bytes, request_timeout, upstream_timeout, ConnectorConfig, Mode, PurposeSource,
 };
 use crate::errors::{ConnectorError, ConnectorProblem};
-use crate::identity::PeerIdentity;
+use crate::identity::{sha256_hex, PeerIdentity};
 use crate::routing::{find_client_route, find_server_route, RouteMatch};
 use crate::tls::{PeerCertificateChain, ServerTrustPolicy};
 
@@ -320,16 +324,49 @@ fn authorize_server_purpose(
         return Ok(purpose);
     }
     let purpose = purpose.ok_or(ConnectorProblem::PurposeRequired)?;
-    if route_match
-        .route
-        .purposes
-        .iter()
-        .any(|allowed| allowed == &purpose)
-    {
-        Ok(Some(purpose))
+    let purpose_constraints = if route_match.route.purposes.is_empty() {
+        vec![Vec::new()]
     } else {
-        Err(ConnectorProblem::PurposeDenied)
+        vec![route_match.route.purposes.clone()]
+    };
+    let context = PdpRequestContext {
+        purpose: purpose.clone(),
+        legal_basis_ref: None,
+        consent_ref: None,
+        asserted_assurance: None,
+        jurisdiction: None,
+        source_observed_age_seconds: None,
+    };
+    let policy = PdpPolicyInput {
+        policy_id: format!("trust-connector.route.{}", route_match.route.id),
+        policy_hash: route_purpose_policy_hash(route_match),
+        rule_ids: vec![format!("route-purpose:{}", route_match.route.id)],
+        purpose_constraints,
+        permitted_jurisdictions: Vec::new(),
+        allowed_assurance: Vec::new(),
+        minimum_assurance: None,
+        max_source_age_seconds: None,
+        require_legal_basis: false,
+        require_consent: false,
+        redaction_fields: Default::default(),
+        unsupported_odrl_terms: Vec::new(),
+    };
+    match pdp_decide(&context, &policy) {
+        PdpDecision::Permit(_) | PdpDecision::PermitWithRedaction { .. } => Ok(Some(purpose)),
+        PdpDecision::Deny { .. } => Err(ConnectorProblem::PurposeDenied),
     }
+}
+
+fn route_purpose_policy_hash(route_match: &RouteMatch<'_>) -> String {
+    let mut material = format!(
+        "route_id={};require_purpose={};purposes=",
+        route_match.route.id, route_match.route.require_purpose
+    );
+    for purpose in &route_match.route.purposes {
+        material.push_str(purpose);
+        material.push('\n');
+    }
+    format!("sha256:{}", sha256_hex(material.as_bytes()))
 }
 
 fn single_data_purpose(headers: &HeaderMap) -> Result<Option<String>, ConnectorProblem> {

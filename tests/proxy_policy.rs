@@ -207,6 +207,40 @@ async fn server_rejects_duplicate_data_purpose_headers() {
 }
 
 #[tokio::test]
+async fn server_rejects_single_disallowed_purpose_without_forwarding() {
+    std::env::set_var("REGISTRY_PROXY_POLICY_DENIED_PURPOSE_TOKEN", "relay-token");
+    let temp = TempDir::new().expect("temp dir");
+    let certs = write_test_pki(temp.path());
+    let (upstream, mut received) =
+        start_upstream(upstream_response(StatusCode::OK, vec![], "accepted")).await;
+    let mut config = server_config(&certs, upstream);
+    config.routes[0].upstream_auth_header_env =
+        Some("REGISTRY_PROXY_POLICY_DENIED_PURPOSE_TOKEN".to_string());
+    config.routes[0].require_purpose = true;
+    config.routes[0].purposes = vec!["allowed-purpose".to_string()];
+    let app = router(ProxyState::server(Arc::new(config)).expect("server proxy state"));
+
+    let mut request = Request::builder()
+        .method(Method::GET)
+        .uri("/upstream/records")
+        .header("data-purpose", "denied-purpose")
+        .body(Body::empty())
+        .expect("request");
+    request
+        .extensions_mut()
+        .insert(PeerCertificateChain(vec![certs.client_der]));
+
+    let response = app.oneshot(request).await.expect("proxy response");
+
+    assert_problem(response, StatusCode::FORBIDDEN, "connector.purpose_denied").await;
+    assert!(
+        received.try_recv().is_err(),
+        "denied purpose must not reach upstream"
+    );
+    std::env::remove_var("REGISTRY_PROXY_POLICY_DENIED_PURPOSE_TOKEN");
+}
+
+#[tokio::test]
 async fn server_forwards_one_canonical_authorized_purpose_header() {
     std::env::set_var("REGISTRY_PROXY_POLICY_PURPOSE_TOKEN", "relay-token");
     let temp = TempDir::new().expect("temp dir");
