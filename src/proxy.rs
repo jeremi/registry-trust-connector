@@ -738,12 +738,12 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(DATA_PURPOSE, HeaderValue::from_static("marketing"));
 
-        tracing::subscriber::with_default(subscriber, || {
-            assert_eq!(
-                authorize_server_purpose(&route_match, &headers),
-                Err(ConnectorProblem::PurposeDenied)
-            );
-        });
+        tracing::subscriber::set_global_default(subscriber).expect("install test subscriber");
+        tracing::callsite::rebuild_interest_cache();
+        assert_eq!(
+            authorize_server_purpose(&route_match, &headers),
+            Err(ConnectorProblem::PurposeDenied)
+        );
 
         let logs = String::from_utf8(logs.lock().expect("logs").clone()).expect("utf8 logs");
         assert!(logs.contains(r#""route_id":"server-route""#), "{logs}");
