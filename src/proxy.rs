@@ -708,7 +708,6 @@ mod tests {
             .with_ansi(false)
             .with_writer(SharedLogWriter(Arc::clone(&logs)))
             .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
         let route = test_route();
         let route_match = RouteMatch {
             route: &route,
@@ -717,10 +716,12 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(DATA_PURPOSE, HeaderValue::from_static("marketing"));
 
-        assert_eq!(
-            authorize_server_purpose(&route_match, &headers),
-            Err(ConnectorProblem::PurposeDenied)
-        );
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(
+                authorize_server_purpose(&route_match, &headers),
+                Err(ConnectorProblem::PurposeDenied)
+            );
+        });
 
         let logs = String::from_utf8(logs.lock().expect("logs").clone()).expect("utf8 logs");
         assert!(logs.contains(r#""route_id":"server-route""#), "{logs}");
