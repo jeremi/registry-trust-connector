@@ -94,6 +94,7 @@ fn client_config() -> ConnectorConfig {
             governed_policy: None,
             allow_forward_authorization: false,
             allow_forward_cookie: false,
+            policy_hash: Default::default(),
         }],
         server_identity: None,
         client_trust: None,

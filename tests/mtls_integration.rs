@@ -464,6 +464,7 @@ fn client_config(certs: &TestPki, server_addr: SocketAddr) -> ConnectorConfig {
                 governed_policy: None,
                 allow_forward_authorization: false,
                 allow_forward_cookie: false,
+                policy_hash: Default::default(),
             },
             RouteConfig {
                 id: "social-registry-static-read".to_string(),
@@ -479,6 +480,7 @@ fn client_config(certs: &TestPki, server_addr: SocketAddr) -> ConnectorConfig {
                 governed_policy: None,
                 allow_forward_authorization: false,
                 allow_forward_cookie: false,
+                policy_hash: Default::default(),
             },
         ],
         server_identity: None,
@@ -518,6 +520,7 @@ fn server_config(certs: &TestPki, upstream: &Url) -> ConnectorConfig {
             governed_policy: None,
             allow_forward_authorization: false,
             allow_forward_cookie: false,
+            policy_hash: Default::default(),
         }],
         server_identity: Some(IdentityFiles {
             cert: certs.server_cert.clone(),

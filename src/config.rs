@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use http::header::{HeaderName, HeaderValue};
@@ -207,6 +208,39 @@ pub struct RouteConfig {
     pub allow_forward_authorization: bool,
     #[serde(default)]
     pub allow_forward_cookie: bool,
+    #[serde(skip)]
+    pub policy_hash: PolicyHashCache,
+}
+
+#[derive(Debug, Default)]
+pub struct PolicyHashCache {
+    inner: Mutex<Option<(String, String)>>,
+}
+
+impl Clone for PolicyHashCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PolicyHashCache {
+    pub fn get_or_compute<F>(&self, material: String, compute: F) -> String
+    where
+        F: FnOnce(&str) -> String,
+    {
+        let mut cached = self
+            .inner
+            .lock()
+            .expect("route policy hash cache is healthy");
+        if let Some((cached_material, cached_hash)) = cached.as_ref() {
+            if cached_material == &material {
+                return cached_hash.clone();
+            }
+        }
+        let hash = compute(&material);
+        *cached = Some((material, hash.clone()));
+        hash
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]

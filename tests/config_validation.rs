@@ -36,6 +36,7 @@ fn client_route(id: &str) -> RouteConfig {
         governed_policy: None,
         allow_forward_authorization: false,
         allow_forward_cookie: false,
+        policy_hash: Default::default(),
     }
 }
 
@@ -54,6 +55,7 @@ fn server_route(id: &str, client_identity: Option<&str>) -> RouteConfig {
         governed_policy: None,
         allow_forward_authorization: false,
         allow_forward_cookie: false,
+        policy_hash: Default::default(),
     }
 }
 

@@ -339,6 +339,9 @@ fn authorize_server_purpose(
     {
         purpose_constraints.push(configured_purposes);
     }
+    if route_match.route.require_purpose && purpose_constraints.is_empty() {
+        return Err(ConnectorProblem::PurposeDenied);
+    }
     let context = PdpRequestContext {
         purpose: purpose.clone(),
         legal_basis_ref: governed_policy
@@ -517,7 +520,9 @@ fn route_purpose_policy_hash(route_match: &RouteMatch<'_>) -> String {
                 .unwrap_or_default(),
         );
     }
-    format!("sha256:{}", sha256_hex(material.as_bytes()))
+    route.policy_hash.get_or_compute(material, |material| {
+        format!("sha256:{}", sha256_hex(material.as_bytes()))
+    })
 }
 
 fn push_hash_field(material: &mut String, name: &str, value: &str) {
@@ -751,6 +756,26 @@ mod tests {
     }
 
     #[test]
+    fn required_purpose_denies_when_no_allowed_purpose_is_configured() {
+        let route = RouteConfig {
+            purposes: Vec::new(),
+            governed_policy: Some(GovernedRoutePolicyConfig::default()),
+            ..test_route()
+        };
+        let route_match = RouteMatch {
+            route: &route,
+            upstream_path: "/relay/packages/records".to_string(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(DATA_PURPOSE, HeaderValue::from_static("operations"));
+
+        assert_eq!(
+            authorize_server_purpose(&route_match, &headers),
+            Err(ConnectorProblem::PurposeDenied)
+        );
+    }
+
+    #[test]
     fn governed_route_policy_permits_when_trusted_context_satisfies_policy() {
         let route = RouteConfig {
             governed_policy: Some(GovernedRoutePolicyConfig {
@@ -874,6 +899,7 @@ mod tests {
             governed_policy: None,
             allow_forward_authorization: false,
             allow_forward_cookie: false,
+            policy_hash: Default::default(),
         }
     }
 
