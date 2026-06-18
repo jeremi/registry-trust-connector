@@ -202,9 +202,49 @@ pub struct RouteConfig {
     #[serde(default)]
     pub purposes: Vec<String>,
     #[serde(default)]
+    pub governed_policy: Option<GovernedRoutePolicyConfig>,
+    #[serde(default)]
     pub allow_forward_authorization: bool,
     #[serde(default)]
     pub allow_forward_cookie: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedRoutePolicyConfig {
+    #[serde(default)]
+    pub permitted_purposes: Vec<String>,
+    #[serde(default)]
+    pub permitted_jurisdictions: Vec<String>,
+    #[serde(default)]
+    pub allowed_assurance: Vec<String>,
+    #[serde(default)]
+    pub minimum_assurance: Option<String>,
+    #[serde(default)]
+    pub max_source_age_seconds: Option<u64>,
+    #[serde(default)]
+    pub require_legal_basis: bool,
+    #[serde(default)]
+    pub require_consent: bool,
+    #[serde(default)]
+    pub redaction_fields: Vec<String>,
+    #[serde(default)]
+    pub trusted_context: GovernedTrustedContextConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedTrustedContextConfig {
+    #[serde(default)]
+    pub jurisdiction: Option<String>,
+    #[serde(default)]
+    pub asserted_assurance: Option<String>,
+    #[serde(default)]
+    pub legal_basis_ref: Option<String>,
+    #[serde(default)]
+    pub consent_ref: Option<String>,
+    #[serde(default)]
+    pub source_observed_age_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -339,6 +379,75 @@ fn validate_common(config: &ConnectorConfig, errors: &mut Vec<String>) {
                 errors.push(format!("route '{}' contains an empty purpose", route.id));
             }
         }
+        if let Some(policy) = route.governed_policy.as_ref() {
+            validate_governed_route_policy(&route.id, policy, errors);
+        }
+    }
+}
+
+fn validate_governed_route_policy(
+    route_id: &str,
+    policy: &GovernedRoutePolicyConfig,
+    errors: &mut Vec<String>,
+) {
+    for purpose in &policy.permitted_purposes {
+        if purpose.trim().is_empty() {
+            errors.push(format!(
+                "route '{route_id}' governed_policy contains an empty permitted_purpose"
+            ));
+        }
+    }
+    for jurisdiction in &policy.permitted_jurisdictions {
+        if jurisdiction.trim().is_empty() {
+            errors.push(format!(
+                "route '{route_id}' governed_policy contains an empty permitted_jurisdiction"
+            ));
+        }
+    }
+    for assurance in &policy.allowed_assurance {
+        if assurance.trim().is_empty() {
+            errors.push(format!(
+                "route '{route_id}' governed_policy contains an empty allowed_assurance"
+            ));
+        }
+    }
+    if matches!(policy.minimum_assurance.as_deref(), Some(value) if value.trim().is_empty()) {
+        errors.push(format!(
+            "route '{route_id}' governed_policy minimum_assurance must not be empty"
+        ));
+    }
+    if policy.max_source_age_seconds == Some(0) {
+        errors.push(format!(
+            "route '{route_id}' governed_policy max_source_age_seconds must be greater than zero"
+        ));
+    }
+    for field in &policy.redaction_fields {
+        if field.trim().is_empty() {
+            errors.push(format!(
+                "route '{route_id}' governed_policy contains an empty redaction_field"
+            ));
+        }
+    }
+    let trusted = &policy.trusted_context;
+    if matches!(trusted.jurisdiction.as_deref(), Some(value) if value.trim().is_empty()) {
+        errors.push(format!(
+            "route '{route_id}' governed_policy trusted_context.jurisdiction must not be empty"
+        ));
+    }
+    if matches!(trusted.asserted_assurance.as_deref(), Some(value) if value.trim().is_empty()) {
+        errors.push(format!(
+            "route '{route_id}' governed_policy trusted_context.asserted_assurance must not be empty"
+        ));
+    }
+    if matches!(trusted.legal_basis_ref.as_deref(), Some(value) if value.trim().is_empty()) {
+        errors.push(format!(
+            "route '{route_id}' governed_policy trusted_context.legal_basis_ref must not be empty"
+        ));
+    }
+    if matches!(trusted.consent_ref.as_deref(), Some(value) if value.trim().is_empty()) {
+        errors.push(format!(
+            "route '{route_id}' governed_policy trusted_context.consent_ref must not be empty"
+        ));
     }
 }
 

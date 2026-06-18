@@ -91,6 +91,7 @@ fn client_config() -> ConnectorConfig {
             upstream_auth_header_env: None,
             forward_client_identity_header: false,
             purposes: Vec::new(),
+            governed_policy: None,
             allow_forward_authorization: false,
             allow_forward_cookie: false,
         }],

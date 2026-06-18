@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -320,53 +320,213 @@ fn authorize_server_purpose(
     headers: &HeaderMap,
 ) -> Result<Option<String>, ConnectorProblem> {
     let purpose = single_data_purpose(headers)?;
-    if route_match.route.purposes.is_empty() && !route_match.route.require_purpose {
+    let governed_policy = route_match.route.governed_policy.as_ref();
+    if route_match.route.purposes.is_empty()
+        && !route_match.route.require_purpose
+        && governed_policy.is_none()
+    {
         return Ok(purpose);
     }
     let purpose = purpose.ok_or(ConnectorProblem::PurposeRequired)?;
-    let purpose_constraints = if route_match.route.purposes.is_empty() {
-        vec![Vec::new()]
+    let mut purpose_constraints = if route_match.route.purposes.is_empty() {
+        Vec::new()
     } else {
         vec![route_match.route.purposes.clone()]
     };
+    if let Some(configured_purposes) = governed_policy
+        .map(|policy| policy.permitted_purposes.clone())
+        .filter(|purposes| !purposes.is_empty())
+    {
+        purpose_constraints.push(configured_purposes);
+    }
     let context = PdpRequestContext {
         purpose: purpose.clone(),
-        legal_basis_ref: None,
-        consent_ref: None,
-        asserted_assurance: None,
-        jurisdiction: None,
-        source_observed_age_seconds: None,
+        legal_basis_ref: governed_policy
+            .and_then(|policy| policy.trusted_context.legal_basis_ref.clone()),
+        consent_ref: governed_policy.and_then(|policy| policy.trusted_context.consent_ref.clone()),
+        asserted_assurance: governed_policy
+            .and_then(|policy| policy.trusted_context.asserted_assurance.clone()),
+        jurisdiction: governed_policy
+            .and_then(|policy| policy.trusted_context.jurisdiction.clone()),
+        source_observed_age_seconds: governed_policy
+            .and_then(|policy| policy.trusted_context.source_observed_age_seconds),
     };
     let policy = PdpPolicyInput {
         policy_id: format!("trust-connector.route.{}", route_match.route.id),
         policy_hash: route_purpose_policy_hash(route_match),
         rule_ids: vec![format!("route-purpose:{}", route_match.route.id)],
         purpose_constraints,
-        permitted_jurisdictions: Vec::new(),
-        allowed_assurance: Vec::new(),
-        minimum_assurance: None,
-        max_source_age_seconds: None,
-        require_legal_basis: false,
-        require_consent: false,
-        redaction_fields: Default::default(),
+        permitted_jurisdictions: governed_policy
+            .map(|policy| policy.permitted_jurisdictions.clone())
+            .unwrap_or_default(),
+        allowed_assurance: governed_policy
+            .map(|policy| policy.allowed_assurance.clone())
+            .unwrap_or_default(),
+        minimum_assurance: governed_policy.and_then(|policy| policy.minimum_assurance.clone()),
+        max_source_age_seconds: governed_policy.and_then(|policy| policy.max_source_age_seconds),
+        require_legal_basis: governed_policy.is_some_and(|policy| policy.require_legal_basis),
+        require_consent: governed_policy.is_some_and(|policy| policy.require_consent),
+        redaction_fields: governed_policy
+            .map(|policy| policy.redaction_fields.iter().cloned().collect())
+            .unwrap_or_default(),
         unsupported_odrl_terms: Vec::new(),
     };
     match pdp_decide(&context, &policy) {
         PdpDecision::Permit(_) | PdpDecision::PermitWithRedaction { .. } => Ok(Some(purpose)),
-        PdpDecision::Deny { .. } => Err(ConnectorProblem::PurposeDenied),
+        PdpDecision::Deny { audit, .. } => {
+            tracing::info!(
+                route_id = %route_match.route.id,
+                pdp_policy_id = %audit.policy_id,
+                pdp_policy_hash = %audit.policy_hash,
+                pdp_evaluated_rule_ids = ?audit.evaluated_rule_ids,
+                "server connector denied purpose by pdp"
+            );
+            Err(ConnectorProblem::PurposeDenied)
+        }
     }
 }
 
 fn route_purpose_policy_hash(route_match: &RouteMatch<'_>) -> String {
-    let mut material = format!(
-        "route_id={};require_purpose={};purposes=",
-        route_match.route.id, route_match.route.require_purpose
+    let route = route_match.route;
+    let mut material = String::new();
+    push_hash_field(&mut material, "schema", "route-purpose-policy-v3");
+    push_hash_field(&mut material, "route_id", &route.id);
+    push_hash_field(
+        &mut material,
+        "client_identity",
+        route.client_identity.as_deref().unwrap_or(""),
     );
-    for purpose in &route_match.route.purposes {
-        material.push_str(purpose);
-        material.push('\n');
+    push_hash_field(
+        &mut material,
+        "local_prefix",
+        route.local_prefix.as_deref().unwrap_or(""),
+    );
+    push_hash_field(
+        &mut material,
+        "upstream_prefix",
+        route.upstream_prefix.as_deref().unwrap_or(""),
+    );
+    push_hash_field(
+        &mut material,
+        "require_purpose",
+        if route.require_purpose {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    for method in route
+        .methods
+        .iter()
+        .map(Method::as_str)
+        .collect::<BTreeSet<_>>()
+    {
+        push_hash_field(&mut material, "method", method);
+    }
+    for purpose in route.purposes.iter().collect::<BTreeSet<_>>() {
+        push_hash_field(&mut material, "purpose", purpose);
+    }
+    if let Some(policy) = route.governed_policy.as_ref() {
+        push_hash_field(&mut material, "governed_policy", "true");
+        push_hash_field(
+            &mut material,
+            "governed_minimum_assurance",
+            policy.minimum_assurance.as_deref().unwrap_or(""),
+        );
+        push_hash_field(
+            &mut material,
+            "governed_max_source_age_seconds",
+            &policy
+                .max_source_age_seconds
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        );
+        push_hash_field(
+            &mut material,
+            "governed_require_legal_basis",
+            if policy.require_legal_basis {
+                "true"
+            } else {
+                "false"
+            },
+        );
+        push_hash_field(
+            &mut material,
+            "governed_require_consent",
+            if policy.require_consent {
+                "true"
+            } else {
+                "false"
+            },
+        );
+        for purpose in policy.permitted_purposes.iter().collect::<BTreeSet<_>>() {
+            push_hash_field(&mut material, "governed_permitted_purpose", purpose);
+        }
+        for jurisdiction in policy
+            .permitted_jurisdictions
+            .iter()
+            .collect::<BTreeSet<_>>()
+        {
+            push_hash_field(
+                &mut material,
+                "governed_permitted_jurisdiction",
+                jurisdiction,
+            );
+        }
+        for assurance in policy.allowed_assurance.iter().collect::<BTreeSet<_>>() {
+            push_hash_field(&mut material, "governed_allowed_assurance", assurance);
+        }
+        for field in policy.redaction_fields.iter().collect::<BTreeSet<_>>() {
+            push_hash_field(&mut material, "governed_redaction_field", field);
+        }
+        push_hash_field(
+            &mut material,
+            "trusted_jurisdiction",
+            policy.trusted_context.jurisdiction.as_deref().unwrap_or(""),
+        );
+        push_hash_field(
+            &mut material,
+            "trusted_asserted_assurance",
+            policy
+                .trusted_context
+                .asserted_assurance
+                .as_deref()
+                .unwrap_or(""),
+        );
+        push_hash_field(
+            &mut material,
+            "trusted_legal_basis_ref",
+            policy
+                .trusted_context
+                .legal_basis_ref
+                .as_deref()
+                .unwrap_or(""),
+        );
+        push_hash_field(
+            &mut material,
+            "trusted_consent_ref",
+            policy.trusted_context.consent_ref.as_deref().unwrap_or(""),
+        );
+        push_hash_field(
+            &mut material,
+            "trusted_source_observed_age_seconds",
+            &policy
+                .trusted_context
+                .source_observed_age_seconds
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        );
     }
     format!("sha256:{}", sha256_hex(material.as_bytes()))
+}
+
+fn push_hash_field(material: &mut String, name: &str, value: &str) {
+    material.push_str(name);
+    material.push(':');
+    material.push_str(&value.len().to_string());
+    material.push(':');
+    material.push_str(value);
+    material.push('\n');
 }
 
 fn single_data_purpose(headers: &HeaderMap) -> Result<Option<String>, ConnectorProblem> {
@@ -528,3 +688,216 @@ fn build_url(base: &Url, path: &str, query: Option<&str>) -> Result<Url, url::Pa
 
 #[allow(dead_code)]
 fn _identity_marker(_: &PeerIdentity) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{GovernedRoutePolicyConfig, GovernedTrustedContextConfig, RouteConfig};
+    use std::io::{self, Write};
+
+    #[test]
+    fn denied_server_purpose_logs_pdp_audit_provenance() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_writer(SharedLogWriter(Arc::clone(&logs)))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let route = test_route();
+        let route_match = RouteMatch {
+            route: &route,
+            upstream_path: "/relay/packages/records".to_string(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(DATA_PURPOSE, HeaderValue::from_static("marketing"));
+
+        assert_eq!(
+            authorize_server_purpose(&route_match, &headers),
+            Err(ConnectorProblem::PurposeDenied)
+        );
+
+        let logs = String::from_utf8(logs.lock().expect("logs").clone()).expect("utf8 logs");
+        assert!(logs.contains(r#""route_id":"server-route""#), "{logs}");
+        assert!(
+            logs.contains(r#""pdp_policy_id":"trust-connector.route.server-route""#),
+            "{logs}"
+        );
+        assert!(logs.contains(r#""pdp_policy_hash":"sha256:"#), "{logs}");
+        assert!(logs.contains("route-purpose:server-route"), "{logs}");
+    }
+
+    #[test]
+    fn governed_route_policy_denies_when_required_trusted_context_is_missing() {
+        let route = RouteConfig {
+            governed_policy: Some(GovernedRoutePolicyConfig {
+                permitted_purposes: vec!["operations".to_string()],
+                require_legal_basis: true,
+                ..GovernedRoutePolicyConfig::default()
+            }),
+            ..test_route()
+        };
+        let route_match = RouteMatch {
+            route: &route,
+            upstream_path: "/relay/packages/records".to_string(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(DATA_PURPOSE, HeaderValue::from_static("operations"));
+
+        assert_eq!(
+            authorize_server_purpose(&route_match, &headers),
+            Err(ConnectorProblem::PurposeDenied)
+        );
+    }
+
+    #[test]
+    fn governed_route_policy_permits_when_trusted_context_satisfies_policy() {
+        let route = RouteConfig {
+            governed_policy: Some(GovernedRoutePolicyConfig {
+                permitted_purposes: vec!["operations".to_string()],
+                permitted_jurisdictions: vec!["ZZ".to_string()],
+                allowed_assurance: vec!["substantial".to_string()],
+                require_legal_basis: true,
+                require_consent: true,
+                trusted_context: GovernedTrustedContextConfig {
+                    jurisdiction: Some("ZZ".to_string()),
+                    asserted_assurance: Some("substantial".to_string()),
+                    legal_basis_ref: Some("law:test".to_string()),
+                    consent_ref: Some("consent:test".to_string()),
+                    source_observed_age_seconds: None,
+                },
+                ..GovernedRoutePolicyConfig::default()
+            }),
+            ..test_route()
+        };
+        let route_match = RouteMatch {
+            route: &route,
+            upstream_path: "/relay/packages/records".to_string(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(DATA_PURPOSE, HeaderValue::from_static("operations"));
+
+        assert_eq!(
+            authorize_server_purpose(&route_match, &headers),
+            Ok(Some("operations".to_string()))
+        );
+    }
+
+    #[test]
+    fn route_purpose_policy_hash_changes_for_client_identity() {
+        let route = test_route();
+        let baseline = hash_for_route(&route);
+        let changed = hash_for_route(&RouteConfig {
+            client_identity: Some("spiffe://openspp.example/client-b".to_string()),
+            ..route
+        });
+
+        assert_ne!(baseline, changed);
+    }
+
+    #[test]
+    fn route_purpose_policy_hash_changes_for_method_set() {
+        let route = test_route();
+        let baseline = hash_for_route(&route);
+        let changed = hash_for_route(&RouteConfig {
+            methods: vec![Method::GET],
+            ..route
+        });
+
+        assert_ne!(baseline, changed);
+    }
+
+    #[test]
+    fn route_purpose_policy_hash_changes_for_upstream_route_material() {
+        let route = test_route();
+        let baseline = hash_for_route(&route);
+        let changed = hash_for_route(&RouteConfig {
+            upstream_prefix: Some("/relay/search".to_string()),
+            ..route
+        });
+
+        assert_ne!(baseline, changed);
+    }
+
+    #[test]
+    fn route_purpose_policy_hash_changes_for_governed_policy_material() {
+        let route = test_route();
+        let baseline = hash_for_route(&route);
+        let changed = hash_for_route(&RouteConfig {
+            governed_policy: Some(GovernedRoutePolicyConfig {
+                permitted_jurisdictions: vec!["ZZ".to_string()],
+                require_legal_basis: true,
+                trusted_context: GovernedTrustedContextConfig {
+                    jurisdiction: Some("ZZ".to_string()),
+                    legal_basis_ref: Some("law:test".to_string()),
+                    ..GovernedTrustedContextConfig::default()
+                },
+                ..GovernedRoutePolicyConfig::default()
+            }),
+            ..route
+        });
+
+        assert_ne!(baseline, changed);
+    }
+
+    #[test]
+    fn route_purpose_policy_hash_is_stable_for_set_ordering() {
+        let route = test_route();
+        let reordered = RouteConfig {
+            methods: vec![Method::POST, Method::GET],
+            purposes: vec!["eligibility".to_string(), "operations".to_string()],
+            ..test_route()
+        };
+
+        assert_eq!(hash_for_route(&route), hash_for_route(&reordered));
+    }
+
+    fn hash_for_route(route: &RouteConfig) -> String {
+        route_purpose_policy_hash(&RouteMatch {
+            route,
+            upstream_path: "/relay/packages/records".to_string(),
+        })
+    }
+
+    fn test_route() -> RouteConfig {
+        RouteConfig {
+            id: "server-route".to_string(),
+            methods: vec![Method::GET, Method::POST],
+            local_prefix: None,
+            upstream_prefix: Some("/relay/packages".to_string()),
+            require_purpose: true,
+            purpose_source: None,
+            client_identity: Some("spiffe://openspp.example/client-a".to_string()),
+            upstream_auth_header_env: Some("REGISTRY_PROXY_POLICY_TOKEN".to_string()),
+            forward_client_identity_header: false,
+            purposes: vec!["operations".to_string(), "eligibility".to_string()],
+            governed_policy: None,
+            allow_forward_authorization: false,
+            allow_forward_cookie: false,
+        }
+    }
+
+    #[derive(Clone)]
+    struct SharedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct SharedLogWriteGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+        type Writer = SharedLogWriteGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriteGuard(Arc::clone(&self.0))
+        }
+    }
+
+    impl Write for SharedLogWriteGuard {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("logs").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+}
