@@ -88,6 +88,7 @@ fn client_config() -> ConnectorConfig {
             require_purpose: false,
             purpose_source: None,
             client_identity: None,
+            client_identities: Vec::new(),
             upstream_auth_header_env: None,
             forward_client_identity_header: false,
             purposes: Vec::new(),

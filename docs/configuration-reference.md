@@ -111,6 +111,7 @@ Server mode requires `client_trust`:
 | `allowed_identities` | array of strings | Required | Exact client identities allowed to call the server connector. |
 | `trust_anchors` | array of objects | Required | Trust anchors that bind identities to certificate authorities. |
 | `denied_certificate_fingerprints_sha256` | array of strings | `[]` | Emergency denylist of lowercase or uppercase SHA-256 leaf certificate fingerprints. A matching certificate is rejected even when it chains to a trusted anchor. |
+| `trust_context_entitlements` | array of objects | `[]` | Exact per-client trust assertion grants. Request trust headers are ignored unless the authenticated client identity has a matching entitlement. |
 
 Each trust anchor has:
 
@@ -123,6 +124,13 @@ Each trust anchor has:
 For SPIFFE identities, the trust domain from the identity must have a matching
 trust anchor. For DNS identities, `allow_dns_san_identity: true` must be set and
 the identity must appear in at least one `trust_anchors[].dns_identities` list.
+
+Each trust context entitlement has:
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `client_identity` | string | Required | Exact client identity receiving the trust assertion grant. Must be in `client_trust.allowed_identities`. |
+| `trusted_context` | object | Required | Trust assertions this peer may prove through request headers. At least one assertion must be configured. |
 
 ## Upstream
 
@@ -153,10 +161,12 @@ Each route has:
 | `upstream_prefix` | string | Required | client, server | Upstream path prefix. Client mode rewrites `local_prefix` to this prefix. Server mode matches this prefix. |
 | `require_purpose` | boolean | `false` | client, server | Requires a non-empty `data-purpose` value. |
 | `purpose_source` | `client_provided`, `static_route_default`, or `denied_missing` | `denied_missing` when purpose is required | client | Defines how client mode obtains the `data-purpose` value. |
-| `client_identity` | string | Required in server mode | server | Exact client identity allowed for this route. Must be in `client_trust.allowed_identities`. |
+| `client_identity` | string | Required in server mode unless `client_identities` is set | server | Exact client identity allowed for this route. Must be in `client_trust.allowed_identities`. |
+| `client_identities` | array of strings | `[]` | server | Additional exact client identities allowed for this route. Each value must be in `client_trust.allowed_identities`. |
 | `upstream_auth_header_env` | string | None | server | Route-specific env var for upstream auth injection. |
 | `forward_client_identity_header` | boolean | `false` | server | Adds `x-registry-connector-client-identity` to the upstream request after mTLS authorization. |
 | `purposes` | array of strings | `[]` | server | Allowed purpose values for the route. Empty strings are rejected. |
+| `governed_policy` | object | None | server | Optional PDP policy gates for the route. A governed policy must enforce at least one gate. |
 | `allow_forward_authorization` | boolean | `false` | client, server | Allows caller-supplied `Authorization` to pass through header filtering. Server mode still injects the configured upstream auth header after filtering. |
 | `allow_forward_cookie` | boolean | `false` | client, server | Allows caller-supplied `Cookie` to pass through header filtering. |
 
@@ -165,6 +175,28 @@ must not contain decoded `.` or `..` path segments, and request paths must not
 use percent-encoded path delimiters such as `%2f`. Prefix matching is
 canonicalized and segment-aware, so `/relay/v1` matches `/relay/v1/records` but
 not `/relay/v10`.
+
+## Governed policy
+
+`governed_policy` can constrain server-mode routes by purpose, jurisdiction,
+assurance, source freshness, legal basis, consent, unsupported ODRL terms, and
+redaction fields. Redaction decisions deny because the connector does not
+rewrite evidence payloads.
+
+`governed_policy.trusted_context` is a route-static deployment allowlist for
+exact trust assertion values. It does not prove request provenance and does not
+populate PDP context by itself. Request trust headers are usable only when the
+authenticated peer also has a matching
+`client_trust.trust_context_entitlements[]` grant. A missing, different, or
+unentitled value is ignored and the PDP denies if the gate needs that context.
+
+Supported request trust headers are:
+
+- `x-registry-trust-jurisdiction`
+- `x-registry-trust-assurance`
+- `x-registry-trust-legal-basis`
+- `x-registry-trust-consent`
+- `x-registry-source-observed-age-seconds`
 
 ## Header policy
 

@@ -37,8 +37,16 @@ OpenSPP-style app
   -> http://registry-relay:8080 on a private network
 ```
 
+The connector is not an X-Road Security Server, an X-Road protocol
+implementation, or a replacement for X-Road infrastructure. It can be used as a
+Registry-specific policy boundary in deployments that also use X-Road, with
+X-Road remaining responsible for X-Road transport, member identity, service
+metadata, and federation behavior.
+
 ## Documentation
 
+- [Documentation index](docs/README.md)
+- [Architecture overview](docs/architecture-overview.md)
 - [Get started with a local connector pair](docs/get-started.md)
 - [Demo and test environment](docs/demo-test-environment.md)
 - [Run the connector](docs/run-the-connector.md)

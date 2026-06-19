@@ -61,7 +61,7 @@ pub fn find_server_route<'a>(
         if !route.methods.iter().any(|candidate| candidate == method) {
             continue;
         }
-        if route.client_identity.as_deref() != Some(client_identity) {
+        if !route_matches_client_identity(route, client_identity) {
             continue;
         }
         let Some(prefix) = route.upstream_prefix.as_deref() else {
@@ -85,6 +85,14 @@ pub fn find_server_route<'a>(
     }
     best.map(|(_, route_match)| route_match)
         .ok_or_else(|| "no server route matched".to_string())
+}
+
+fn route_matches_client_identity(route: &RouteConfig, client_identity: &str) -> bool {
+    route.client_identity.as_deref() == Some(client_identity)
+        || route
+            .client_identities
+            .iter()
+            .any(|allowed| allowed == client_identity)
 }
 
 pub fn validate_route_prefix(prefix: &str) -> Result<(), String> {

@@ -15,8 +15,8 @@ use rcgen::{
 };
 use registry_trust_connector::config::{
     upstream_timeout, AuditConfig, ClientServerConfig, ClientTrustConfig, ConnectorConfig,
-    DefaultsConfig, GovernedRoutePolicyConfig, LimitsConfig, ListenConfig, RouteConfig,
-    TrustAnchorConfig, UpstreamConfig,
+    DefaultsConfig, GovernedRoutePolicyConfig, GovernedTrustedContextConfig, LimitsConfig,
+    ListenConfig, RouteConfig, TrustAnchorConfig, TrustContextEntitlementConfig, UpstreamConfig,
 };
 use registry_trust_connector::errors::ConnectorProblem;
 use registry_trust_connector::identity::sha256_hex;
@@ -30,6 +30,7 @@ use tower::ServiceExt;
 use url::Url;
 
 const CLIENT_IDENTITY: &str = "spiffe://openspp.example/client/benefits-system";
+const UNENTITLED_CLIENT_IDENTITY: &str = "spiffe://openspp.example/client/reporting-system";
 
 #[test]
 fn connector_problem_audit_dimensions_are_stable() {
@@ -81,6 +82,12 @@ fn connector_problem_audit_dimensions_are_stable() {
             "denied",
             Some("rate_limit"),
             Some("rate_limited"),
+        ),
+        (
+            ConnectorProblem::PdpDenied(registry_platform_pdp::LEGAL_BASIS_REQUIRED),
+            "denied",
+            Some("pdp"),
+            Some(registry_platform_pdp::LEGAL_BASIS_REQUIRED),
         ),
         (ConnectorProblem::ConfigInvalid, "failed", None, None),
         (ConnectorProblem::UpstreamAuthMissing, "failed", None, None),
@@ -233,7 +240,12 @@ async fn server_rejects_single_disallowed_purpose_without_forwarding() {
 
     let response = app.oneshot(request).await.expect("proxy response");
 
-    assert_problem(response, StatusCode::FORBIDDEN, "connector.purpose_denied").await;
+    assert_problem(
+        response,
+        StatusCode::FORBIDDEN,
+        registry_platform_pdp::PURPOSE_NOT_PERMITTED,
+    )
+    .await;
     assert!(
         received.try_recv().is_err(),
         "denied purpose must not reach upstream"
@@ -272,7 +284,12 @@ async fn server_denies_governed_policy_redaction_without_forwarding() {
 
     let response = app.oneshot(request).await.expect("proxy response");
 
-    assert_problem(response, StatusCode::FORBIDDEN, "connector.purpose_denied").await;
+    assert_problem(
+        response,
+        StatusCode::FORBIDDEN,
+        registry_platform_pdp::UNSUPPORTED_POLICY_TERM,
+    )
+    .await;
     assert!(
         received.try_recv().is_err(),
         "redaction decision the connector cannot enforce must not reach upstream"
@@ -314,12 +331,118 @@ async fn server_denies_unsupported_odrl_terms_without_forwarding() {
 
     let response = app.oneshot(request).await.expect("proxy response");
 
-    assert_problem(response, StatusCode::FORBIDDEN, "connector.purpose_denied").await;
+    assert_problem(
+        response,
+        StatusCode::FORBIDDEN,
+        registry_platform_pdp::UNSUPPORTED_POLICY_TERM,
+    )
+    .await;
     assert!(
         received.try_recv().is_err(),
         "unsupported governed policy terms must not reach upstream"
     );
     std::env::remove_var("REGISTRY_PROXY_POLICY_UNSUPPORTED_ODRL_TOKEN");
+}
+
+#[tokio::test]
+async fn server_governed_policy_requires_peer_trust_entitlement_on_same_route() {
+    std::env::set_var("REGISTRY_PROXY_POLICY_CONTEXT_TOKEN", "relay-token");
+    let temp = TempDir::new().expect("temp dir");
+    let certs = write_test_pki(temp.path());
+    let (upstream, mut received) =
+        start_upstream(upstream_response(StatusCode::OK, vec![], "accepted")).await;
+    let mut config = server_config(&certs, upstream);
+    config.routes[0].upstream_auth_header_env =
+        Some("REGISTRY_PROXY_POLICY_CONTEXT_TOKEN".to_string());
+    config.routes[0].client_identity = None;
+    config.routes[0].client_identities = vec![
+        CLIENT_IDENTITY.to_string(),
+        UNENTITLED_CLIENT_IDENTITY.to_string(),
+    ];
+    config.routes[0].require_purpose = true;
+    config.routes[0].purposes = vec!["allowed-purpose".to_string()];
+    config.routes[0].governed_policy = Some(GovernedRoutePolicyConfig {
+        permitted_purposes: vec!["allowed-purpose".to_string()],
+        permitted_jurisdictions: vec!["ZZ".to_string()],
+        allowed_assurance: vec!["substantial".to_string()],
+        max_source_age_seconds: Some(30),
+        require_legal_basis: true,
+        require_consent: true,
+        trusted_context: GovernedTrustedContextConfig {
+            jurisdiction: Some("ZZ".to_string()),
+            asserted_assurance: Some("substantial".to_string()),
+            legal_basis_ref: Some("law:test".to_string()),
+            consent_ref: Some("consent:test".to_string()),
+            source_observed_age_seconds: Some(5),
+        },
+        ..GovernedRoutePolicyConfig::default()
+    });
+    let trust = config.client_trust.as_mut().expect("client trust");
+    trust
+        .allowed_identities
+        .push(UNENTITLED_CLIENT_IDENTITY.to_string());
+    trust.trust_context_entitlements = vec![TrustContextEntitlementConfig {
+        client_identity: CLIENT_IDENTITY.to_string(),
+        trusted_context: GovernedTrustedContextConfig {
+            jurisdiction: Some("ZZ".to_string()),
+            asserted_assurance: Some("substantial".to_string()),
+            legal_basis_ref: Some("law:test".to_string()),
+            consent_ref: Some("consent:test".to_string()),
+            source_observed_age_seconds: Some(5),
+        },
+    }];
+    let app = router(ProxyState::server(Arc::new(config)).expect("server proxy state"));
+
+    let mut allowed = Request::builder()
+        .method(Method::GET)
+        .uri("/upstream/records")
+        .header("data-purpose", "allowed-purpose")
+        .header("x-registry-trust-jurisdiction", "ZZ")
+        .header("x-registry-trust-assurance", "substantial")
+        .header("x-registry-trust-legal-basis", "law:test")
+        .header("x-registry-trust-consent", "consent:test")
+        .header("x-registry-source-observed-age-seconds", "5")
+        .body(Body::empty())
+        .expect("request");
+    allowed
+        .extensions_mut()
+        .insert(PeerCertificateChain(vec![certs.client_der.clone()]));
+
+    let response = app.clone().oneshot(allowed).await.expect("proxy response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let request = received.recv().await.expect("captured upstream request");
+    assert_eq!(
+        header(&request.headers, "data-purpose"),
+        Some("allowed-purpose")
+    );
+
+    let mut denied = Request::builder()
+        .method(Method::GET)
+        .uri("/upstream/records")
+        .header("data-purpose", "allowed-purpose")
+        .header("x-registry-trust-jurisdiction", "ZZ")
+        .header("x-registry-trust-assurance", "substantial")
+        .header("x-registry-trust-legal-basis", "law:test")
+        .header("x-registry-trust-consent", "consent:test")
+        .header("x-registry-source-observed-age-seconds", "5")
+        .body(Body::empty())
+        .expect("request");
+    denied
+        .extensions_mut()
+        .insert(PeerCertificateChain(vec![certs.unentitled_client_der]));
+
+    let response = app.oneshot(denied).await.expect("proxy response");
+    assert_problem(
+        response,
+        StatusCode::FORBIDDEN,
+        registry_platform_pdp::JURISDICTION_NOT_PERMITTED,
+    )
+    .await;
+    assert!(
+        received.try_recv().is_err(),
+        "unentitled peer trust headers must not reach upstream"
+    );
+    std::env::remove_var("REGISTRY_PROXY_POLICY_CONTEXT_TOKEN");
 }
 
 #[tokio::test]
@@ -726,6 +849,7 @@ fn server_config(certs: &TestPki, upstream: Url) -> ConnectorConfig {
             require_purpose: false,
             purpose_source: None,
             client_identity: Some(CLIENT_IDENTITY.to_string()),
+            client_identities: Vec::new(),
             upstream_auth_header_env: Some("REGISTRY_PROXY_POLICY_MISSING_TOKEN".to_string()),
             forward_client_identity_header: false,
             purposes: Vec::new(),
@@ -743,6 +867,7 @@ fn server_config(certs: &TestPki, upstream: Url) -> ConnectorConfig {
                 dns_identities: Vec::new(),
             }],
             denied_certificate_fingerprints_sha256: Vec::new(),
+            trust_context_entitlements: Vec::new(),
         }),
         upstream: Some(UpstreamConfig {
             base_url: upstream,
@@ -770,6 +895,7 @@ fn route(
         require_purpose: false,
         purpose_source: None,
         client_identity: None,
+        client_identities: Vec::new(),
         upstream_auth_header_env: None,
         forward_client_identity_header: false,
         purposes: Vec::new(),
@@ -909,17 +1035,21 @@ fn assert_header_absent(headers: &HeaderMap, name: &str) {
 struct TestPki {
     ca_cert: PathBuf,
     client_der: rustls::pki_types::CertificateDer<'static>,
+    unentitled_client_der: rustls::pki_types::CertificateDer<'static>,
 }
 
 fn write_test_pki(root: &Path) -> TestPki {
     let (ca, ca_key) = test_ca();
-    let (client_cert, _client_key) = signed_client_leaf(&ca, &ca_key);
+    let (client_cert, _client_key) = signed_client_leaf(&ca, &ca_key, CLIENT_IDENTITY);
+    let (unentitled_client_cert, _unentitled_client_key) =
+        signed_client_leaf(&ca, &ca_key, UNENTITLED_CLIENT_IDENTITY);
     let ca_cert = root.join("ca.pem");
     fs::write(&ca_cert, ca.pem()).expect("write ca");
 
     TestPki {
         ca_cert,
         client_der: client_cert.der().clone(),
+        unentitled_client_der: unentitled_client_cert.der().clone(),
     }
 }
 
@@ -939,17 +1069,21 @@ fn test_ca() -> (Certificate, KeyPair) {
     (cert, key)
 }
 
-fn signed_client_leaf(ca: &Certificate, ca_key: &KeyPair) -> (Certificate, KeyPair) {
+fn signed_client_leaf(
+    ca: &Certificate,
+    ca_key: &KeyPair,
+    identity: &str,
+) -> (Certificate, KeyPair) {
     let mut params = CertificateParams::new(Vec::new()).expect("leaf params");
     params
         .distinguished_name
-        .push(DnType::CommonName, "benefits-system");
+        .push(DnType::CommonName, "connector-test-client");
     params.is_ca = IsCa::NoCa;
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     params
         .subject_alt_names
-        .push(SanType::URI(CLIENT_IDENTITY.try_into().expect("URI SAN")));
+        .push(SanType::URI(identity.try_into().expect("URI SAN")));
     let key = KeyPair::generate().expect("leaf key");
     let cert = params.signed_by(&key, ca, ca_key).expect("leaf cert");
     (cert, key)
