@@ -88,11 +88,11 @@ pub fn find_server_route<'a>(
 }
 
 fn route_matches_client_identity(route: &RouteConfig, client_identity: &str) -> bool {
-    route.client_identity.as_deref() == Some(client_identity)
+    route.client_identity.as_deref().map(str::trim) == Some(client_identity)
         || route
             .client_identities
             .iter()
-            .any(|allowed| allowed == client_identity)
+            .any(|allowed| allowed.trim() == client_identity)
 }
 
 pub fn validate_route_prefix(prefix: &str) -> Result<(), String> {

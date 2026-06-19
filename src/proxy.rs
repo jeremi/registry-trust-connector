@@ -672,7 +672,7 @@ fn peer_trusted_context_scopes(
     client_trust
         .into_iter()
         .flat_map(|trust| trust.trust_context_entitlements.iter())
-        .find(|entitlement| entitlement.client_identity == client_identity)
+        .find(|entitlement| entitlement.client_identity.trim() == client_identity)
         .map(|entitlement| context_scopes(&entitlement.trusted_context))
         .unwrap_or_default()
 }
@@ -1530,6 +1530,18 @@ mod tests {
                 trusted_context: trusted_context_grants(),
             }],
         }
+    }
+
+    #[test]
+    fn peer_trusted_context_scopes_trims_configured_identity() {
+        let mut trust = test_client_trust();
+        trust.trust_context_entitlements[0].client_identity =
+            " spiffe://openspp.example/client-a ".to_string();
+
+        let scopes = peer_trusted_context_scopes(Some(&trust), "spiffe://openspp.example/client-a");
+
+        assert!(scopes.contains("registry:trust:jurisdiction:ZZ"));
+        assert!(scopes.contains("registry:trust:assurance:substantial"));
     }
 
     fn trusted_context_grants() -> GovernedTrustedContextConfig {

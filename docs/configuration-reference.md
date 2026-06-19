@@ -197,6 +197,7 @@ Supported request trust headers are:
 - `x-registry-trust-legal-basis`
 - `x-registry-trust-consent`
 - `x-registry-source-observed-age-seconds`
+- `x-registry-source-observed-at-unix-seconds`
 
 ## Header policy
 

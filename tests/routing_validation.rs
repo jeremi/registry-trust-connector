@@ -95,6 +95,36 @@ fn server_route_matching_uses_canonical_paths_and_most_specific_prefix() {
 }
 
 #[test]
+fn server_route_matching_trims_configured_client_identities() {
+    let mut single = server_route("single", "/single", " spiffe://client.example/workload ");
+    let matched = registry_trust_connector::routing::find_server_route(
+        std::slice::from_ref(&single),
+        &Method::GET,
+        "/single/records",
+        "spiffe://client.example/workload",
+    )
+    .expect("single configured identity should trim before matching");
+
+    assert_eq!(matched.route.id, "single");
+
+    single.client_identity = None;
+    single.client_identities = vec![
+        " spiffe://client.example/workload ".to_string(),
+        "spiffe://client.example/other".to_string(),
+    ];
+    let routes = [single];
+    let matched = registry_trust_connector::routing::find_server_route(
+        &routes,
+        &Method::GET,
+        "/single/records",
+        "spiffe://client.example/workload",
+    )
+    .expect("configured identity allowlist should trim before matching");
+
+    assert_eq!(matched.route.id, "single");
+}
+
+#[test]
 fn request_paths_reject_encoded_slash_delimiters() {
     let err = validate_request_path("/v1/a%2fb").expect_err("encoded slash delimiter must fail");
 
