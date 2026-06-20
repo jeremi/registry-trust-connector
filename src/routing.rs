@@ -88,6 +88,7 @@ pub fn find_server_route<'a>(
 }
 
 fn route_matches_client_identity(route: &RouteConfig, client_identity: &str) -> bool {
+    let client_identity = client_identity.trim();
     route.client_identity.as_deref().map(str::trim) == Some(client_identity)
         || route
             .client_identities

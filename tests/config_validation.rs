@@ -596,6 +596,32 @@ fn server_config_accepts_route_client_identity_sets() {
 }
 
 #[test]
+fn server_config_validation_trims_allowed_identities_for_routes_and_entitlements() {
+    let mut config = server_config();
+    let client_trust = config.client_trust.as_mut().expect("client trust");
+    client_trust.allowed_identities = vec![
+        " spiffe://client.example/ns/default/sa/relay ".to_string(),
+        "spiffe://client.example/ns/default/sa/reporting".to_string(),
+    ];
+    client_trust.trust_context_entitlements = vec![TrustContextEntitlementConfig {
+        client_identity: " spiffe://client.example/ns/default/sa/relay ".to_string(),
+        trusted_context: GovernedTrustedContextConfig {
+            jurisdiction: Some("ZZ".to_string()),
+            ..GovernedTrustedContextConfig::default()
+        },
+    }];
+    config.routes = vec![RouteConfig {
+        client_identity: Some(" spiffe://client.example/ns/default/sa/relay ".to_string()),
+        client_identities: vec![" spiffe://client.example/ns/default/sa/reporting ".to_string()],
+        ..server_route("packages", None)
+    }];
+
+    let errors = validation_errors(&config, Mode::Server);
+
+    assert_error_absent(&errors, "not in client_trust.allowed_identities");
+}
+
+#[test]
 fn server_config_rejects_invalid_trust_context_entitlements() {
     let mut config = server_config();
     config

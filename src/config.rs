@@ -430,7 +430,7 @@ fn validate_common(config: &ConnectorConfig, errors: &mut Vec<String>) {
         for identity in &route.client_identities {
             if identity.trim().is_empty() {
                 errors.push(format!(
-                    "route '{}' contains an empty client_identity",
+                    "route '{}' contains an empty client_identities entry",
                     route.id
                 ));
             }
@@ -790,7 +790,7 @@ fn validate_server(config: &ConnectorConfig, require_env: bool, errors: &mut Vec
             if !client_trust
                 .allowed_identities
                 .iter()
-                .any(|allowed| allowed == identity)
+                .any(|allowed| allowed.trim() == identity)
             {
                 errors.push(format!(
                     "server route '{}' references client_identity '{}' not in client_trust.allowed_identities",
@@ -824,7 +824,7 @@ fn validate_trust_context_entitlement(
     if !client_trust
         .allowed_identities
         .iter()
-        .any(|allowed| allowed == identity)
+        .any(|allowed| allowed.trim() == identity)
     {
         errors.push(format!(
             "client_trust.trust_context_entitlements client_identity '{}' not in client_trust.allowed_identities",

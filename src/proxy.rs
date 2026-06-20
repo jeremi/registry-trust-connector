@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{to_bytes, Body};
 use axum::extract::State;
@@ -216,7 +216,7 @@ async fn handle_server(
             trust
                 .allowed_identities
                 .iter()
-                .any(|allowed| allowed == &identity.value)
+                .any(|allowed| allowed.trim() == identity.value)
         })
         .unwrap_or(false);
     if !allowed {
@@ -591,22 +591,12 @@ fn request_pdp_context(
         source_binding: Some(source_binding.to_string()),
         route_identity: Some(route_identity.to_string()),
         checked_scopes: BTreeSet::new(),
-        source_observed_at_unix_seconds: verified_trust_header_value(
+        source_observed_at_unix_seconds: source_observed_at_unix_seconds(
             headers,
             trusted_context_scopes,
-            "x-registry-source-observed-at-unix-seconds",
-            "source_observed_at_unix_seconds",
-        )
-        .map(parse_unix_seconds)
-        .transpose()?,
+        )?,
         source_observed_age_seconds: source_observed_age_seconds(headers, trusted_context_scopes)?,
     })
-}
-
-fn parse_unix_seconds(value: &str) -> Result<u64, ConnectorProblem> {
-    value
-        .parse::<u64>()
-        .map_err(|_| ConnectorProblem::PdpDenied(registry_platform_pdp::EVIDENCE_STALE))
 }
 
 fn trust_header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -637,17 +627,62 @@ fn source_observed_age_seconds(
     headers: &HeaderMap,
     trusted_context_scopes: &BTreeSet<String>,
 ) -> Result<Option<u64>, ConnectorProblem> {
-    let Some(value) = trust_header_value(headers, TRUST_SOURCE_OBSERVED_AGE_SECONDS) else {
+    if let Some(value) = trust_header_value(headers, TRUST_SOURCE_OBSERVED_AGE_SECONDS) {
+        let Some(limit) = source_observed_age_limit_seconds(trusted_context_scopes) else {
+            return Ok(None);
+        };
+        let age_seconds = value
+            .parse::<u64>()
+            .map_err(|_| ConnectorProblem::PdpDenied(registry_platform_pdp::EVIDENCE_STALE))?;
+        if age_seconds > limit {
+            return Ok(None);
+        }
+        return Ok(Some(age_seconds));
+    }
+    source_observed_at_with_age(headers, trusted_context_scopes)
+        .map(|observed| observed.map(|(_, age_seconds)| age_seconds))
+}
+
+fn source_observed_at_unix_seconds(
+    headers: &HeaderMap,
+    trusted_context_scopes: &BTreeSet<String>,
+) -> Result<Option<u64>, ConnectorProblem> {
+    source_observed_at_with_age(headers, trusted_context_scopes)
+        .map(|observed| observed.map(|(observed_at, _)| observed_at))
+}
+
+fn source_observed_at_with_age(
+    headers: &HeaderMap,
+    trusted_context_scopes: &BTreeSet<String>,
+) -> Result<Option<(u64, u64)>, ConnectorProblem> {
+    let Some(value) = trust_header_value(headers, "x-registry-source-observed-at-unix-seconds")
+    else {
         return Ok(None);
     };
-    if !trusted_context_scopes.contains(&trust_context_scope("source_observed_age_seconds", value))
-    {
+    let Some(limit) = source_observed_age_limit_seconds(trusted_context_scopes) else {
+        return Ok(None);
+    };
+    let observed_at = value
+        .parse::<u64>()
+        .map_err(|_| ConnectorProblem::PdpDenied(registry_platform_pdp::EVIDENCE_STALE))?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ConnectorProblem::PdpDenied(registry_platform_pdp::EVIDENCE_STALE))?
+        .as_secs();
+    let age_seconds = now.saturating_sub(observed_at);
+    if observed_at > now || age_seconds > limit {
         return Ok(None);
     }
-    value
-        .parse::<u64>()
-        .map(Some)
-        .map_err(|_| ConnectorProblem::PdpDenied(registry_platform_pdp::EVIDENCE_STALE))
+    Ok(Some((observed_at, age_seconds)))
+}
+
+fn source_observed_age_limit_seconds(trusted_context_scopes: &BTreeSet<String>) -> Option<u64> {
+    let prefix = "registry:trust:source_observed_age_seconds:";
+    trusted_context_scopes
+        .iter()
+        .filter_map(|scope| scope.strip_prefix(prefix))
+        .filter_map(|value| value.parse::<u64>().ok())
+        .max()
 }
 
 fn trusted_context_scopes(
@@ -754,9 +789,15 @@ fn route_purpose_policy_hash(route_match: &RouteMatch<'_>) -> String {
     push_hash_field(
         &mut material,
         "client_identity",
-        route.client_identity.as_deref().unwrap_or(""),
+        route.client_identity.as_deref().unwrap_or("").trim(),
     );
-    for identity in route.client_identities.iter().collect::<BTreeSet<_>>() {
+    for identity in route
+        .client_identities
+        .iter()
+        .map(|identity| identity.trim())
+        .filter(|identity| !identity.is_empty())
+        .collect::<BTreeSet<_>>()
+    {
         push_hash_field(&mut material, "client_identity", identity);
     }
     push_hash_field(
@@ -1285,6 +1326,124 @@ mod tests {
     }
 
     #[test]
+    fn governed_route_policy_permits_fresh_dynamic_source_age_when_granted() {
+        let route = RouteConfig {
+            governed_policy: Some(GovernedRoutePolicyConfig {
+                max_source_age_seconds: Some(30),
+                trusted_context: GovernedTrustedContextConfig {
+                    source_observed_age_seconds: Some(5),
+                    ..GovernedTrustedContextConfig::default()
+                },
+                ..GovernedRoutePolicyConfig::default()
+            }),
+            ..test_route()
+        };
+        let route_match = RouteMatch {
+            route: &route,
+            upstream_path: "/relay/packages/records".to_string(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(DATA_PURPOSE, HeaderValue::from_static("operations"));
+        headers.insert(
+            TRUST_SOURCE_OBSERVED_AGE_SECONDS,
+            HeaderValue::from_static("4"),
+        );
+
+        assert_eq!(
+            authorize_server_purpose(
+                &route_match,
+                &headers,
+                &test_identity(),
+                Some(&test_client_trust()),
+            ),
+            Ok(Some("operations".to_string()))
+        );
+    }
+
+    #[test]
+    fn governed_route_policy_permits_fresh_unix_source_timestamp_when_granted() {
+        let route = RouteConfig {
+            governed_policy: Some(GovernedRoutePolicyConfig {
+                max_source_age_seconds: Some(30),
+                trusted_context: GovernedTrustedContextConfig {
+                    source_observed_age_seconds: Some(30),
+                    ..GovernedTrustedContextConfig::default()
+                },
+                ..GovernedRoutePolicyConfig::default()
+            }),
+            ..test_route()
+        };
+        let route_match = RouteMatch {
+            route: &route,
+            upstream_path: "/relay/packages/records".to_string(),
+        };
+        let observed_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_secs()
+            .to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert(DATA_PURPOSE, HeaderValue::from_static("operations"));
+        headers.insert(
+            "x-registry-source-observed-at-unix-seconds",
+            header_value(&observed_at).expect("valid observed_at header"),
+        );
+
+        assert_eq!(
+            authorize_server_purpose(
+                &route_match,
+                &headers,
+                &test_identity(),
+                Some(&client_trust_with_source_age_grant(30)),
+            ),
+            Ok(Some("operations".to_string()))
+        );
+    }
+
+    #[test]
+    fn governed_route_policy_denies_unix_source_timestamp_older_than_grant() {
+        let route = RouteConfig {
+            governed_policy: Some(GovernedRoutePolicyConfig {
+                max_source_age_seconds: Some(30),
+                trusted_context: GovernedTrustedContextConfig {
+                    source_observed_age_seconds: Some(5),
+                    ..GovernedTrustedContextConfig::default()
+                },
+                ..GovernedRoutePolicyConfig::default()
+            }),
+            ..test_route()
+        };
+        let route_match = RouteMatch {
+            route: &route,
+            upstream_path: "/relay/packages/records".to_string(),
+        };
+        let observed_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_secs()
+            .saturating_sub(60)
+            .to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert(DATA_PURPOSE, HeaderValue::from_static("operations"));
+        headers.insert(
+            "x-registry-source-observed-at-unix-seconds",
+            header_value(&observed_at).expect("valid observed_at header"),
+        );
+
+        assert_eq!(
+            authorize_server_purpose(
+                &route_match,
+                &headers,
+                &test_identity(),
+                Some(&test_client_trust()),
+            ),
+            Err(ConnectorProblem::PdpDenied(
+                registry_platform_pdp::EVIDENCE_STALE
+            ))
+        );
+    }
+
+    #[test]
     fn governed_route_policy_ignores_ungranted_trust_headers() {
         let route = RouteConfig {
             governed_policy: Some(GovernedRoutePolicyConfig {
@@ -1485,6 +1644,30 @@ mod tests {
         assert_eq!(hash_for_route(&route), hash_for_route(&reordered));
     }
 
+    #[test]
+    fn route_purpose_policy_hash_trims_configured_client_identities() {
+        let route = test_route();
+        let trimmed = RouteConfig {
+            client_identity: Some(" spiffe://openspp.example/client-a ".to_string()),
+            client_identities: vec![
+                " spiffe://openspp.example/client-b ".to_string(),
+                "spiffe://openspp.example/client-c".to_string(),
+            ],
+            ..test_route()
+        };
+        let normalized = RouteConfig {
+            client_identity: Some("spiffe://openspp.example/client-a".to_string()),
+            client_identities: vec![
+                "spiffe://openspp.example/client-c".to_string(),
+                "spiffe://openspp.example/client-b".to_string(),
+            ],
+            ..test_route()
+        };
+
+        assert_eq!(hash_for_route(&trimmed), hash_for_route(&normalized));
+        assert_ne!(hash_for_route(&route), hash_for_route(&normalized));
+    }
+
     fn hash_for_route(route: &RouteConfig) -> String {
         route_purpose_policy_hash(&RouteMatch {
             route,
@@ -1521,13 +1704,20 @@ mod tests {
     }
 
     fn test_client_trust() -> ClientTrustConfig {
+        client_trust_with_source_age_grant(5)
+    }
+
+    fn client_trust_with_source_age_grant(source_observed_age_seconds: u64) -> ClientTrustConfig {
         ClientTrustConfig {
             allowed_identities: vec!["spiffe://openspp.example/client-a".to_string()],
             trust_anchors: Vec::new(),
             denied_certificate_fingerprints_sha256: Vec::new(),
             trust_context_entitlements: vec![TrustContextEntitlementConfig {
                 client_identity: "spiffe://openspp.example/client-a".to_string(),
-                trusted_context: trusted_context_grants(),
+                trusted_context: GovernedTrustedContextConfig {
+                    source_observed_age_seconds: Some(source_observed_age_seconds),
+                    ..trusted_context_grants()
+                },
             }],
         }
     }
