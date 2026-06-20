@@ -21,6 +21,7 @@ registry-platform-httpsec = { version = "0.3.0", path = "../registry-platform/cr
 registry-platform-audit = { version = "0.3.0", path = "../registry-platform/crates/registry-platform-audit" }
 registry-platform-httputil = { version = "0.3.0", path = "../registry-platform/crates/registry-platform-httputil" }
 registry-platform-pdp = { version = "0.3.0", path = "../registry-platform/crates/registry-platform-pdp" }
+registry-config-report = { version = "0.3.0", path = "../registry-platform/crates/registry-config-report" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 rustls = "0.23"
 rustls-pemfile = "2"
@@ -42,5 +43,6 @@ x509-parser = { version = "0.17", features = ["verify"] }
 zeroize = "1"
 
 [dev-dependencies]
+jsonschema = "0.18"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 tempfile = "3"

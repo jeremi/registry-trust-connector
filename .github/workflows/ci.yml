@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: jeremi/registry-platform
-          ref: ${{ github.event_name == 'pull_request' && '903511c24b37917316803790520a19afa9c26569' || 'main' }}
+          ref: ${{ github.event_name == 'pull_request' && 'e5b646f5979a41a65155b674f4769ff063910dba' || 'main' }}
           path: registry-platform
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: jeremi/registry-platform
-          ref: ${{ github.event_name == 'pull_request' && '903511c24b37917316803790520a19afa9c26569' || 'main' }}
+          ref: ${{ github.event_name == 'pull_request' && 'e5b646f5979a41a65155b674f4769ff063910dba' || 'main' }}
           path: registry-platform
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: jeremi/registry-platform
-          ref: ${{ github.event_name == 'pull_request' && '903511c24b37917316803790520a19afa9c26569' || 'main' }}
+          ref: ${{ github.event_name == 'pull_request' && 'e5b646f5979a41a65155b674f4769ff063910dba' || 'main' }}
           path: registry-platform
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -123,7 +123,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: jeremi/registry-platform
-          ref: ${{ github.event_name == 'pull_request' && '903511c24b37917316803790520a19afa9c26569' || 'main' }}
+          ref: ${{ github.event_name == 'pull_request' && 'e5b646f5979a41a65155b674f4769ff063910dba' || 'main' }}
           path: registry-platform
       - uses: docker/setup-buildx-action@v3
       - run: cp examples/.env.example examples/.env
