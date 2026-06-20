@@ -11,6 +11,7 @@ fn route(id: &str, local_prefix: &str, upstream_prefix: &str) -> RouteConfig {
         require_purpose: false,
         purpose_source: None,
         client_identity: None,
+        client_identities: Vec::new(),
         upstream_auth_header_env: None,
         forward_client_identity_header: false,
         purposes: Vec::new(),
@@ -30,6 +31,7 @@ fn server_route(id: &str, upstream_prefix: &str, client_identity: &str) -> Route
         require_purpose: false,
         purpose_source: None,
         client_identity: Some(client_identity.to_string()),
+        client_identities: Vec::new(),
         upstream_auth_header_env: None,
         forward_client_identity_header: false,
         purposes: Vec::new(),
@@ -90,6 +92,36 @@ fn server_route_matching_uses_canonical_paths_and_most_specific_prefix() {
 
     assert_eq!(matched.route.id, "admin");
     assert_eq!(matched.upstream_path, "/v1/admin/records");
+}
+
+#[test]
+fn server_route_matching_trims_configured_client_identities() {
+    let mut single = server_route("single", "/single", " spiffe://client.example/workload ");
+    let matched = registry_trust_connector::routing::find_server_route(
+        std::slice::from_ref(&single),
+        &Method::GET,
+        "/single/records",
+        "spiffe://client.example/workload",
+    )
+    .expect("single configured identity should trim before matching");
+
+    assert_eq!(matched.route.id, "single");
+
+    single.client_identity = None;
+    single.client_identities = vec![
+        " spiffe://client.example/workload ".to_string(),
+        "spiffe://client.example/other".to_string(),
+    ];
+    let routes = [single];
+    let matched = registry_trust_connector::routing::find_server_route(
+        &routes,
+        &Method::GET,
+        "/single/records",
+        "spiffe://client.example/workload",
+    )
+    .expect("configured identity allowlist should trim before matching");
+
+    assert_eq!(matched.route.id, "single");
 }
 
 #[test]

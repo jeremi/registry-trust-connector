@@ -6,8 +6,8 @@ layer: federation
 audience: [integrator, operator, maintainer, specification editor, tooling]
 status: draft
 source_of_truth: src/tls.rs, src/identity.rs, src/errors.rs, src/proxy.rs
-last_reviewed: "2026-06-05"
-standards_referenced: [TLS, X.509, SPIFFE, RFC 9457]
+last_reviewed: "2026-06-19"
+standards_referenced: [TLS, X.509, SPIFFE, RFC 9457, X-Road]
 ---
 
 # Standards conformance
@@ -84,3 +84,19 @@ upstream failures. Each response includes a stable `code` field such as
 The exact problem object is produced through `registry-platform-httpsec`.
 Consumers should depend on the `code` field and HTTP status documented in
 [Configuration reference](configuration-reference.md#problem-responses).
+
+## X-Road
+
+Adoption mode: not implemented.
+
+The connector is not an X-Road Security Server and does not implement the
+X-Road message protocol, service metadata protocols, central or global
+configuration, member or subsystem management, operational monitoring, message
+signing, message logging, or federation behavior.
+
+The connector can be deployed beside systems that use X-Road as a
+Registry-specific policy boundary before Relay access. In that pattern, X-Road
+infrastructure remains responsible for X-Road transport and conformance, while
+the connector remains responsible only for its configured mTLS, identity,
+route, purpose, governed-policy, header, upstream-auth, and problem-response
+behavior.
