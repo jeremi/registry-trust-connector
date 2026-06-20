@@ -7,8 +7,9 @@ use rcgen::{
 };
 use registry_trust_connector::config::{
     validate_config, AuditConfig, ClientServerConfig, ClientTrustConfig, ConnectorConfig,
-    DefaultsConfig, IdentityFiles, LimitsConfig, ListenConfig, Mode, RouteConfig,
-    TrustAnchorConfig, UpstreamConfig,
+    DefaultsConfig, GovernedRoutePolicyConfig, GovernedTrustedContextConfig, IdentityFiles,
+    LimitsConfig, ListenConfig, Mode, RouteConfig, TrustAnchorConfig,
+    TrustContextEntitlementConfig, UpstreamConfig,
 };
 use registry_trust_connector::identity::extract_peer_identity_from_der;
 use tempfile::TempDir;
@@ -30,11 +31,14 @@ fn client_route(id: &str) -> RouteConfig {
         require_purpose: false,
         purpose_source: None,
         client_identity: None,
+        client_identities: Vec::new(),
         upstream_auth_header_env: None,
         forward_client_identity_header: false,
         purposes: Vec::new(),
+        governed_policy: None,
         allow_forward_authorization: false,
         allow_forward_cookie: false,
+        policy_hash: Default::default(),
     }
 }
 
@@ -47,11 +51,14 @@ fn server_route(id: &str, client_identity: Option<&str>) -> RouteConfig {
         require_purpose: false,
         purpose_source: None,
         client_identity: client_identity.map(str::to_string),
+        client_identities: Vec::new(),
         upstream_auth_header_env: None,
         forward_client_identity_header: false,
         purposes: Vec::new(),
+        governed_policy: None,
         allow_forward_authorization: false,
         allow_forward_cookie: false,
+        policy_hash: Default::default(),
     }
 }
 
@@ -100,6 +107,7 @@ fn server_config() -> ConnectorConfig {
                 dns_identities: Vec::new(),
             }],
             denied_certificate_fingerprints_sha256: Vec::new(),
+            trust_context_entitlements: Vec::new(),
         }),
         upstream: Some(UpstreamConfig {
             base_url: Url::parse("http://127.0.0.1:9000").expect("upstream url"),
@@ -121,6 +129,13 @@ fn assert_error_contains(errors: &[String], needle: &str) {
     assert!(
         errors.iter().any(|err| err.contains(needle)),
         "expected an error containing {needle:?}, got {errors:#?}"
+    );
+}
+
+fn assert_error_absent(errors: &[String], needle: &str) {
+    assert!(
+        !errors.iter().any(|err| err.contains(needle)),
+        "expected no error containing {needle:?}, got {errors:#?}"
     );
 }
 
@@ -359,6 +374,151 @@ fn config_rejects_empty_route_purposes() {
 }
 
 #[test]
+fn config_rejects_empty_governed_route_policy_terms() {
+    let mut config = server_config();
+    config.routes = vec![RouteConfig {
+        client_identity: Some("spiffe://client.example/ns/default/sa/relay".to_string()),
+        governed_policy: Some(GovernedRoutePolicyConfig {
+            permitted_purposes: vec![" ".to_string()],
+            permitted_jurisdictions: vec![" ".to_string()],
+            allowed_assurance: vec![" ".to_string()],
+            minimum_assurance: Some(" ".to_string()),
+            max_source_age_seconds: Some(0),
+            redaction_fields: vec![" ".to_string()],
+            unsupported_odrl_terms: vec![" ".to_string()],
+            trusted_context: GovernedTrustedContextConfig {
+                jurisdiction: Some(" ".to_string()),
+                asserted_assurance: Some(" ".to_string()),
+                legal_basis_ref: Some(" ".to_string()),
+                consent_ref: Some(" ".to_string()),
+                source_observed_age_seconds: None,
+            },
+            require_legal_basis: false,
+            require_consent: false,
+        }),
+        ..server_route("packages", None)
+    }];
+    config
+        .client_trust
+        .as_mut()
+        .expect("client trust")
+        .trust_anchors = vec![TrustAnchorConfig {
+        ca: PathBuf::from("missing-client-ca.pem"),
+        trust_domain: "client.example".to_string(),
+        dns_identities: Vec::new(),
+    }];
+
+    let errors = validation_errors(&config, Mode::Server);
+
+    assert_error_contains(
+        &errors,
+        "route 'packages' governed_policy contains an empty permitted_purpose",
+    );
+    assert_error_contains(
+        &errors,
+        "route 'packages' governed_policy max_source_age_seconds must be greater than zero",
+    );
+    assert_error_contains(
+        &errors,
+        "route 'packages' governed_policy contains an empty unsupported_odrl_term",
+    );
+    assert_error_contains(
+        &errors,
+        "route 'packages' governed_policy trusted_context.legal_basis_ref must not be empty",
+    );
+}
+
+#[test]
+fn config_rejects_inert_governed_route_policy() {
+    let mut config = server_config();
+    config.routes = vec![RouteConfig {
+        client_identity: Some("spiffe://client.example/ns/default/sa/relay".to_string()),
+        governed_policy: Some(GovernedRoutePolicyConfig::default()),
+        ..server_route("packages", None)
+    }];
+    config
+        .client_trust
+        .as_mut()
+        .expect("client trust")
+        .trust_anchors = vec![TrustAnchorConfig {
+        ca: PathBuf::from("missing-client-ca.pem"),
+        trust_domain: "client.example".to_string(),
+        dns_identities: Vec::new(),
+    }];
+
+    let errors = validation_errors(&config, Mode::Server);
+
+    assert_error_contains(
+        &errors,
+        "route 'packages' governed_policy must enforce at least one gate",
+    );
+}
+
+#[test]
+fn config_rejects_governed_route_policy_with_only_static_trusted_context() {
+    let mut config = server_config();
+    config.routes = vec![RouteConfig {
+        client_identity: Some("spiffe://client.example/ns/default/sa/relay".to_string()),
+        governed_policy: Some(GovernedRoutePolicyConfig {
+            trusted_context: GovernedTrustedContextConfig {
+                jurisdiction: Some("ZZ".to_string()),
+                asserted_assurance: Some("substantial".to_string()),
+                legal_basis_ref: Some("law:test".to_string()),
+                consent_ref: Some("consent:test".to_string()),
+                source_observed_age_seconds: Some(5),
+            },
+            ..GovernedRoutePolicyConfig::default()
+        }),
+        ..server_route("packages", None)
+    }];
+    config
+        .client_trust
+        .as_mut()
+        .expect("client trust")
+        .trust_anchors = vec![TrustAnchorConfig {
+        ca: PathBuf::from("missing-client-ca.pem"),
+        trust_domain: "client.example".to_string(),
+        dns_identities: Vec::new(),
+    }];
+
+    let errors = validation_errors(&config, Mode::Server);
+
+    assert_error_contains(
+        &errors,
+        "route 'packages' governed_policy must enforce at least one gate",
+    );
+}
+
+#[test]
+fn config_accepts_governed_route_policy_with_real_gate() {
+    let mut config = server_config();
+    config.routes = vec![RouteConfig {
+        client_identity: Some("spiffe://client.example/ns/default/sa/relay".to_string()),
+        governed_policy: Some(GovernedRoutePolicyConfig {
+            require_legal_basis: true,
+            ..GovernedRoutePolicyConfig::default()
+        }),
+        ..server_route("packages", None)
+    }];
+    config
+        .client_trust
+        .as_mut()
+        .expect("client trust")
+        .trust_anchors = vec![TrustAnchorConfig {
+        ca: PathBuf::from("missing-client-ca.pem"),
+        trust_domain: "client.example".to_string(),
+        dns_identities: Vec::new(),
+    }];
+
+    let errors = validation_errors(&config, Mode::Server);
+
+    assert_error_absent(
+        &errors,
+        "route 'packages' governed_policy must enforce at least one gate",
+    );
+}
+
+#[test]
 fn server_config_rejects_spiffe_client_identity_without_matching_trust_anchor() {
     let mut config = server_config();
     config.routes = vec![server_route(
@@ -399,6 +559,98 @@ fn server_config_rejects_route_client_identity_not_in_allowlist() {
     assert_error_contains(
         &errors,
         "server route 'packages' references client_identity 'spiffe://client.example/ns/default/sa/other' not in client_trust.allowed_identities",
+    );
+}
+
+#[test]
+fn server_config_accepts_route_client_identity_sets() {
+    let mut config = server_config();
+    config
+        .client_trust
+        .as_mut()
+        .expect("client trust")
+        .allowed_identities
+        .push("spiffe://client.example/ns/default/sa/reporting".to_string());
+    config.routes = vec![RouteConfig {
+        client_identity: None,
+        client_identities: vec![
+            "spiffe://client.example/ns/default/sa/relay".to_string(),
+            "spiffe://client.example/ns/default/sa/reporting".to_string(),
+        ],
+        ..server_route("packages", None)
+    }];
+    config
+        .client_trust
+        .as_mut()
+        .expect("client trust")
+        .trust_anchors = vec![TrustAnchorConfig {
+        ca: PathBuf::from("missing-client-ca.pem"),
+        trust_domain: "client.example".to_string(),
+        dns_identities: Vec::new(),
+    }];
+
+    let errors = validation_errors(&config, Mode::Server);
+
+    assert_error_absent(&errors, "requires client_identity");
+    assert_error_absent(&errors, "not in client_trust.allowed_identities");
+}
+
+#[test]
+fn server_config_validation_trims_allowed_identities_for_routes_and_entitlements() {
+    let mut config = server_config();
+    let client_trust = config.client_trust.as_mut().expect("client trust");
+    client_trust.allowed_identities = vec![
+        " spiffe://client.example/ns/default/sa/relay ".to_string(),
+        "spiffe://client.example/ns/default/sa/reporting".to_string(),
+    ];
+    client_trust.trust_context_entitlements = vec![TrustContextEntitlementConfig {
+        client_identity: " spiffe://client.example/ns/default/sa/relay ".to_string(),
+        trusted_context: GovernedTrustedContextConfig {
+            jurisdiction: Some("ZZ".to_string()),
+            ..GovernedTrustedContextConfig::default()
+        },
+    }];
+    config.routes = vec![RouteConfig {
+        client_identity: Some(" spiffe://client.example/ns/default/sa/relay ".to_string()),
+        client_identities: vec![" spiffe://client.example/ns/default/sa/reporting ".to_string()],
+        ..server_route("packages", None)
+    }];
+
+    let errors = validation_errors(&config, Mode::Server);
+
+    assert_error_absent(&errors, "not in client_trust.allowed_identities");
+}
+
+#[test]
+fn server_config_rejects_invalid_trust_context_entitlements() {
+    let mut config = server_config();
+    config
+        .client_trust
+        .as_mut()
+        .expect("client trust")
+        .trust_context_entitlements = vec![
+        TrustContextEntitlementConfig {
+            client_identity: "spiffe://client.example/ns/default/sa/other".to_string(),
+            trusted_context: GovernedTrustedContextConfig {
+                jurisdiction: Some("ZZ".to_string()),
+                ..GovernedTrustedContextConfig::default()
+            },
+        },
+        TrustContextEntitlementConfig {
+            client_identity: "spiffe://client.example/ns/default/sa/relay".to_string(),
+            trusted_context: GovernedTrustedContextConfig::default(),
+        },
+    ];
+
+    let errors = validation_errors(&config, Mode::Server);
+
+    assert_error_contains(
+        &errors,
+        "client_trust.trust_context_entitlements client_identity 'spiffe://client.example/ns/default/sa/other' not in client_trust.allowed_identities",
+    );
+    assert_error_contains(
+        &errors,
+        "client_trust.trust_context_entitlements for 'spiffe://client.example/ns/default/sa/relay' must grant at least one trust context assertion",
     );
 }
 

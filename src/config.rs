@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use http::header::{HeaderName, HeaderValue};
@@ -157,6 +158,16 @@ pub struct ClientTrustConfig {
     pub trust_anchors: Vec<TrustAnchorConfig>,
     #[serde(default)]
     pub denied_certificate_fingerprints_sha256: Vec<String>,
+    #[serde(default)]
+    pub trust_context_entitlements: Vec<TrustContextEntitlementConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustContextEntitlementConfig {
+    pub client_identity: String,
+    #[serde(default)]
+    pub trusted_context: GovernedTrustedContextConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -196,15 +207,92 @@ pub struct RouteConfig {
     #[serde(default)]
     pub client_identity: Option<String>,
     #[serde(default)]
+    pub client_identities: Vec<String>,
+    #[serde(default)]
     pub upstream_auth_header_env: Option<String>,
     #[serde(default)]
     pub forward_client_identity_header: bool,
     #[serde(default)]
     pub purposes: Vec<String>,
     #[serde(default)]
+    pub governed_policy: Option<GovernedRoutePolicyConfig>,
+    #[serde(default)]
     pub allow_forward_authorization: bool,
     #[serde(default)]
     pub allow_forward_cookie: bool,
+    #[serde(skip)]
+    pub policy_hash: PolicyHashCache,
+}
+
+#[derive(Debug, Default)]
+pub struct PolicyHashCache {
+    inner: Mutex<Option<(String, String)>>,
+}
+
+impl Clone for PolicyHashCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PolicyHashCache {
+    pub fn get_or_compute<F>(&self, material: String, compute: F) -> String
+    where
+        F: FnOnce(&str) -> String,
+    {
+        let mut cached = self
+            .inner
+            .lock()
+            .expect("route policy hash cache is healthy");
+        if let Some((cached_material, cached_hash)) = cached.as_ref() {
+            if cached_material == &material {
+                return cached_hash.clone();
+            }
+        }
+        let hash = compute(&material);
+        *cached = Some((material, hash.clone()));
+        hash
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedRoutePolicyConfig {
+    #[serde(default)]
+    pub permitted_purposes: Vec<String>,
+    #[serde(default)]
+    pub permitted_jurisdictions: Vec<String>,
+    #[serde(default)]
+    pub allowed_assurance: Vec<String>,
+    #[serde(default)]
+    pub minimum_assurance: Option<String>,
+    #[serde(default)]
+    pub max_source_age_seconds: Option<u64>,
+    #[serde(default)]
+    pub require_legal_basis: bool,
+    #[serde(default)]
+    pub require_consent: bool,
+    #[serde(default)]
+    pub redaction_fields: Vec<String>,
+    #[serde(default)]
+    pub unsupported_odrl_terms: Vec<String>,
+    #[serde(default)]
+    pub trusted_context: GovernedTrustedContextConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedTrustedContextConfig {
+    #[serde(default)]
+    pub jurisdiction: Option<String>,
+    #[serde(default)]
+    pub asserted_assurance: Option<String>,
+    #[serde(default)]
+    pub legal_basis_ref: Option<String>,
+    #[serde(default)]
+    pub consent_ref: Option<String>,
+    #[serde(default)]
+    pub source_observed_age_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -339,7 +427,156 @@ fn validate_common(config: &ConnectorConfig, errors: &mut Vec<String>) {
                 errors.push(format!("route '{}' contains an empty purpose", route.id));
             }
         }
+        for identity in &route.client_identities {
+            if identity.trim().is_empty() {
+                errors.push(format!(
+                    "route '{}' contains an empty client_identities entry",
+                    route.id
+                ));
+            }
+        }
+        if let Some(policy) = route.governed_policy.as_ref() {
+            validate_governed_route_policy(&route.id, policy, errors);
+        }
     }
+}
+
+fn validate_governed_route_policy(
+    route_id: &str,
+    policy: &GovernedRoutePolicyConfig,
+    errors: &mut Vec<String>,
+) {
+    if !governed_route_policy_has_gate(policy) {
+        errors.push(format!(
+            "route '{route_id}' governed_policy must enforce at least one gate"
+        ));
+    }
+    for purpose in &policy.permitted_purposes {
+        if purpose.trim().is_empty() {
+            errors.push(format!(
+                "route '{route_id}' governed_policy contains an empty permitted_purpose"
+            ));
+        }
+    }
+    for jurisdiction in &policy.permitted_jurisdictions {
+        if jurisdiction.trim().is_empty() {
+            errors.push(format!(
+                "route '{route_id}' governed_policy contains an empty permitted_jurisdiction"
+            ));
+        }
+    }
+    for assurance in &policy.allowed_assurance {
+        if assurance.trim().is_empty() {
+            errors.push(format!(
+                "route '{route_id}' governed_policy contains an empty allowed_assurance"
+            ));
+        }
+    }
+    if matches!(policy.minimum_assurance.as_deref(), Some(value) if value.trim().is_empty()) {
+        errors.push(format!(
+            "route '{route_id}' governed_policy minimum_assurance must not be empty"
+        ));
+    }
+    if policy.max_source_age_seconds == Some(0) {
+        errors.push(format!(
+            "route '{route_id}' governed_policy max_source_age_seconds must be greater than zero"
+        ));
+    }
+    for field in &policy.redaction_fields {
+        if field.trim().is_empty() {
+            errors.push(format!(
+                "route '{route_id}' governed_policy contains an empty redaction_field"
+            ));
+        }
+    }
+    for term in &policy.unsupported_odrl_terms {
+        if term.trim().is_empty() {
+            errors.push(format!(
+                "route '{route_id}' governed_policy contains an empty unsupported_odrl_term"
+            ));
+        }
+    }
+    validate_trusted_context_fields(
+        &format!("route '{route_id}' governed_policy trusted_context"),
+        &policy.trusted_context,
+        errors,
+    );
+}
+
+fn governed_route_policy_has_gate(policy: &GovernedRoutePolicyConfig) -> bool {
+    policy
+        .permitted_purposes
+        .iter()
+        .any(|value| !value.trim().is_empty())
+        || policy
+            .permitted_jurisdictions
+            .iter()
+            .any(|value| !value.trim().is_empty())
+        || policy
+            .allowed_assurance
+            .iter()
+            .any(|value| !value.trim().is_empty())
+        || policy
+            .minimum_assurance
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || policy.max_source_age_seconds.is_some_and(|value| value > 0)
+        || policy.require_legal_basis
+        || policy.require_consent
+        || policy
+            .redaction_fields
+            .iter()
+            .any(|value| !value.trim().is_empty())
+        || policy
+            .unsupported_odrl_terms
+            .iter()
+            .any(|value| !value.trim().is_empty())
+}
+
+fn validate_trusted_context_fields(
+    prefix: &str,
+    trusted: &GovernedTrustedContextConfig,
+    errors: &mut Vec<String>,
+) {
+    if matches!(trusted.jurisdiction.as_deref(), Some(value) if value.trim().is_empty()) {
+        errors.push(format!("{prefix}.jurisdiction must not be empty"));
+    }
+    if matches!(trusted.asserted_assurance.as_deref(), Some(value) if value.trim().is_empty()) {
+        errors.push(format!("{prefix}.asserted_assurance must not be empty"));
+    }
+    if matches!(trusted.legal_basis_ref.as_deref(), Some(value) if value.trim().is_empty()) {
+        errors.push(format!("{prefix}.legal_basis_ref must not be empty"));
+    }
+    if matches!(trusted.consent_ref.as_deref(), Some(value) if value.trim().is_empty()) {
+        errors.push(format!("{prefix}.consent_ref must not be empty"));
+    }
+    if trusted.source_observed_age_seconds == Some(0) {
+        errors.push(format!(
+            "{prefix}.source_observed_age_seconds must be greater than zero"
+        ));
+    }
+}
+
+fn trusted_context_has_assertion(trusted: &GovernedTrustedContextConfig) -> bool {
+    trusted
+        .jurisdiction
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || trusted
+            .asserted_assurance
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || trusted
+            .legal_basis_ref
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || trusted
+            .consent_ref
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || trusted
+            .source_observed_age_seconds
+            .is_some_and(|value| value > 0)
 }
 
 fn validate_client(config: &ConnectorConfig, require_env: bool, errors: &mut Vec<String>) {
@@ -424,6 +661,15 @@ fn validate_server(config: &ConnectorConfig, require_env: bool, errors: &mut Vec
                     .to_string(),
             );
         }
+    }
+    let mut entitlement_identities = BTreeSet::new();
+    for entitlement in &client_trust.trust_context_entitlements {
+        validate_trust_context_entitlement(
+            client_trust,
+            entitlement,
+            &mut entitlement_identities,
+            errors,
+        );
     }
     let mut trust_domains = BTreeSet::new();
     for anchor in &client_trust.trust_anchors {
@@ -532,24 +778,89 @@ fn validate_server(config: &ConnectorConfig, require_env: bool, errors: &mut Vec
                 route.id
             ));
         }
-        let Some(identity) = route.client_identity.as_deref() else {
+        let route_identities = route_client_identities(route);
+        if route_identities.is_empty() {
             errors.push(format!(
                 "server route '{}' requires client_identity so route and purpose policy are identity-bound",
                 route.id
             ));
             continue;
-        };
-        if !client_trust
-            .allowed_identities
-            .iter()
-            .any(|allowed| allowed == identity)
-        {
-            errors.push(format!(
-                "server route '{}' references client_identity '{}' not in client_trust.allowed_identities",
-                route.id, identity
-            ));
+        }
+        for identity in route_identities {
+            if !client_trust
+                .allowed_identities
+                .iter()
+                .any(|allowed| allowed.trim() == identity)
+            {
+                errors.push(format!(
+                    "server route '{}' references client_identity '{}' not in client_trust.allowed_identities",
+                    route.id, identity
+                ));
+            }
         }
     }
+}
+
+fn validate_trust_context_entitlement(
+    client_trust: &ClientTrustConfig,
+    entitlement: &TrustContextEntitlementConfig,
+    seen_identities: &mut BTreeSet<String>,
+    errors: &mut Vec<String>,
+) {
+    let identity = entitlement.client_identity.trim();
+    if identity.is_empty() {
+        errors.push(
+            "client_trust.trust_context_entitlements[].client_identity must not be empty"
+                .to_string(),
+        );
+        return;
+    }
+    if !seen_identities.insert(identity.to_string()) {
+        errors.push(format!(
+            "duplicate client_trust.trust_context_entitlements client_identity '{}'",
+            entitlement.client_identity
+        ));
+    }
+    if !client_trust
+        .allowed_identities
+        .iter()
+        .any(|allowed| allowed.trim() == identity)
+    {
+        errors.push(format!(
+            "client_trust.trust_context_entitlements client_identity '{}' not in client_trust.allowed_identities",
+            entitlement.client_identity
+        ));
+    }
+    if !trusted_context_has_assertion(&entitlement.trusted_context) {
+        errors.push(format!(
+            "client_trust.trust_context_entitlements for '{}' must grant at least one trust context assertion",
+            entitlement.client_identity
+        ));
+    }
+    validate_trusted_context_fields(
+        "client_trust.trust_context_entitlements[].trusted_context",
+        &entitlement.trusted_context,
+        errors,
+    );
+}
+
+fn route_client_identities(route: &RouteConfig) -> BTreeSet<&str> {
+    let mut identities = BTreeSet::new();
+    if let Some(identity) = route
+        .client_identity
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        identities.insert(identity);
+    }
+    for identity in &route.client_identities {
+        let identity = identity.trim();
+        if !identity.is_empty() {
+            identities.insert(identity);
+        }
+    }
+    identities
 }
 
 fn require_audit_hash_env(config: &ConnectorConfig, errors: &mut Vec<String>) {

@@ -14,6 +14,7 @@ pub enum ConnectorProblem {
     BodyTooLarge,
     RequestTimeout,
     RateLimited,
+    PdpDenied(&'static str),
 }
 
 impl ConnectorProblem {
@@ -30,6 +31,7 @@ impl ConnectorProblem {
             Self::BodyTooLarge => "connector.body_too_large",
             Self::RequestTimeout => "connector.request_timeout",
             Self::RateLimited => "connector.rate_limited",
+            Self::PdpDenied(code) => code,
         }
     }
 
@@ -46,6 +48,7 @@ impl ConnectorProblem {
             Self::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::PdpDenied(_) => StatusCode::FORBIDDEN,
         }
     }
 
@@ -62,6 +65,7 @@ impl ConnectorProblem {
             Self::BodyTooLarge => "Request body is too large",
             Self::RequestTimeout => "Request timed out",
             Self::RateLimited => "Request rate limit exceeded",
+            Self::PdpDenied(_) => "Policy decision denied request",
         }
     }
 
@@ -79,6 +83,7 @@ impl ConnectorProblem {
             Self::ClientIdentityMissing | Self::ClientIdentityDenied => Some("identity"),
             Self::RouteDenied => Some("route"),
             Self::PurposeRequired | Self::PurposeDenied => Some("purpose"),
+            Self::PdpDenied(_) => Some("pdp"),
             Self::UpstreamAuthMissing => None,
             Self::UpstreamUnavailable => None,
             Self::BodyTooLarge => Some("request_body"),
@@ -95,6 +100,7 @@ impl ConnectorProblem {
             Self::RouteDenied => Some("route_denied"),
             Self::PurposeRequired => Some("purpose_required"),
             Self::PurposeDenied => Some("purpose_denied"),
+            Self::PdpDenied(code) => Some(code),
             Self::UpstreamAuthMissing => None,
             Self::UpstreamUnavailable => None,
             Self::BodyTooLarge => Some("body_too_large"),
