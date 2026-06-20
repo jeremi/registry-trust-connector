@@ -125,7 +125,7 @@ jobs:
           repository: jeremi/registry-platform
           ref: ${{ github.event_name == 'pull_request' && 'e5b646f5979a41a65155b674f4769ff063910dba' || 'main' }}
           path: registry-platform
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - run: cp examples/.env.example examples/.env
       - run: docker compose --env-file examples/.env -f examples/docker-compose.yml config
       - run: docker compose --env-file examples/.env -f examples/docker-compose.yml build
