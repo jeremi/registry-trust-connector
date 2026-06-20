@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
 use std::convert::Infallible;
+use std::env;
+use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -11,12 +14,16 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as HyperBuilder;
+use registry_config_report::{ConfigValueClassification, ReportStatus, RequiredEnvStatus};
 use registry_platform_httpsec::Problem;
-use registry_trust_connector::config::{self, LoadedConfig, Mode};
+use registry_trust_connector::config::{self, ConnectorConfig, LoadedConfig, Mode};
 use registry_trust_connector::errors::ConnectorError;
 use registry_trust_connector::logging::init_tracing;
 use registry_trust_connector::proxy::{router, ProxyState};
 use registry_trust_connector::tls::{self, PeerCertificateChain};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
@@ -24,6 +31,7 @@ use tower::ServiceExt;
 use tracing::{error, info};
 
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(10);
+const TRUST_CONNECTOR_CONFIG_SCHEMA_VERSION: &str = "registry.trust_connector.config.v1";
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Registry Trust Connector")]
@@ -45,6 +53,9 @@ enum Command {
         /// Override mode detection.
         #[arg(long, value_enum)]
         mode: Option<CliMode>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = ValidationOutputFormat::Text)]
+        format: ValidationOutputFormat,
     },
     /// Run local client-side connector.
     Client {
@@ -64,6 +75,12 @@ enum Command {
 enum CliMode {
     Client,
     Server,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ValidationOutputFormat {
+    Text,
+    Json,
 }
 
 impl From<CliMode> for Mode {
@@ -93,13 +110,8 @@ async fn run() -> Result<(), ConnectorError> {
             config,
             require_env,
             mode,
-        } => {
-            let loaded = config::load(config)?;
-            let mode = mode.map(Mode::from).unwrap_or_else(|| detect_mode(&loaded));
-            validate_or_error(&loaded, mode, require_env)?;
-            println!("registry-trust-connector config valid for {mode:?} mode");
-            Ok(())
-        }
+            format,
+        } => run_validate(config, require_env, mode, format),
         Command::Client { config } => {
             let loaded = config::load(config)?;
             validate_or_error(&loaded, Mode::Client, false)?;
@@ -113,6 +125,89 @@ async fn run() -> Result<(), ConnectorError> {
             run_server(loaded).await
         }
     }
+}
+
+fn run_validate(
+    config_path: PathBuf,
+    require_env: bool,
+    mode: Option<CliMode>,
+    format: ValidationOutputFormat,
+) -> Result<(), ConnectorError> {
+    match format {
+        ValidationOutputFormat::Text => {
+            let loaded = config::load(config_path)?;
+            let mode = mode.map(Mode::from).unwrap_or_else(|| detect_mode(&loaded));
+            validate_or_error(&loaded, mode, require_env)?;
+            println!("registry-trust-connector config valid for {mode:?} mode");
+            Ok(())
+        }
+        ValidationOutputFormat::Json => run_validate_json(config_path, require_env, mode),
+    }
+}
+
+fn run_validate_json(
+    config_path: PathBuf,
+    require_env: bool,
+    mode: Option<CliMode>,
+) -> Result<(), ConnectorError> {
+    let raw_config = fs::read_to_string(&config_path).ok();
+    let loaded = match config::load(&config_path) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            let report = validation_report_json(
+                &config_path,
+                raw_config.as_deref(),
+                None,
+                vec![json!({
+                    "code": "connector.config.load_failed",
+                    "severity": "error",
+                    "message": err.to_string(),
+                })],
+            );
+            println!("{}", json_pretty(&report)?);
+            return Err(err);
+        }
+    };
+    let mode = mode.map(Mode::from).unwrap_or_else(|| detect_mode(&loaded));
+    let diagnostics = match config::validate_config(&loaded.config, mode, require_env) {
+        Ok(()) => vec![json!({
+            "code": "connector.config.valid",
+            "severity": "info",
+            "message": format!("config valid for {mode:?} mode"),
+        })],
+        Err(errors) => errors
+            .iter()
+            .map(|error| {
+                json!({
+                    "code": "connector.config.validation_error",
+                    "severity": "error",
+                    "message": error,
+                })
+            })
+            .collect(),
+    };
+    let report = validation_report_json(
+        &config_path,
+        raw_config.as_deref(),
+        Some(&loaded.config),
+        diagnostics,
+    );
+    let has_errors = report["summary"]["error_count"].as_u64().unwrap_or(0) > 0;
+    println!("{}", json_pretty(&report)?);
+    if has_errors {
+        Err(ConnectorError::InvalidConfig(format!(
+            "{} config failed validation",
+            loaded.path.display()
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn json_pretty(value: &Value) -> Result<String, ConnectorError> {
+    serde_json::to_string_pretty(value).map_err(|err| {
+        ConnectorError::InvalidConfig(format!("failed to render JSON report: {err}"))
+    })
 }
 
 async fn run_client(loaded: LoadedConfig) -> Result<(), ConnectorError> {
@@ -241,6 +336,100 @@ fn detect_mode(loaded: &LoadedConfig) -> Mode {
     } else {
         Mode::Client
     }
+}
+
+fn validation_report_json(
+    config_path: &std::path::Path,
+    raw_config: Option<&str>,
+    config: Option<&ConnectorConfig>,
+    diagnostics: Vec<Value>,
+) -> Value {
+    let error_count = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic["severity"] == "error")
+        .count();
+    let warning_count = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic["severity"] == "warning")
+        .count();
+    let mut report = json!({
+        "schema_version": "registry.config.diagnostic_report.v1",
+        "product": "registry-trust-connector",
+        "config_schema_version": TRUST_CONNECTOR_CONFIG_SCHEMA_VERSION,
+        "source": {
+            "kind": "local_file",
+            "path": path_for_json(config_path),
+        },
+        "status": if error_count > 0 {
+            ReportStatus::Error.as_str()
+        } else if warning_count > 0 {
+            ReportStatus::Warning.as_str()
+        } else {
+            ReportStatus::Ok.as_str()
+        },
+        "summary": {
+            "error_count": error_count,
+            "warning_count": warning_count,
+        },
+        "diagnostics": diagnostics,
+        "required_env": config.map(required_env_report).unwrap_or_default(),
+        "generated_at": now_rfc3339(),
+    });
+    if let Some(raw) = raw_config {
+        report["hashes"] = json!({
+            "internal_config_hash": sha256_hash(raw.as_bytes()),
+        });
+    }
+    report
+}
+
+fn required_env_report(config: &ConnectorConfig) -> Vec<Value> {
+    let mut envs = BTreeMap::new();
+    if let Some(hash_secret_env) = &config.audit.hash_secret_env {
+        envs.insert(hash_secret_env.clone(), ConfigValueClassification::Secret);
+    }
+    if let Some(upstream) = &config.upstream {
+        if let Some(env) = &upstream.default_auth_header_env {
+            envs.insert(env.clone(), ConfigValueClassification::Secret);
+        }
+    }
+    for route in &config.routes {
+        if let Some(env) = &route.upstream_auth_header_env {
+            envs.insert(env.clone(), ConfigValueClassification::Secret);
+        }
+    }
+    envs.into_iter()
+        .map(|(name, classification)| {
+            json!({
+                "name": name,
+                "classification": classification.as_str(),
+                "status": if env::var_os(&name).is_some() {
+                    RequiredEnvStatus::Present.as_str()
+                } else {
+                    RequiredEnvStatus::Missing.as_str()
+                },
+            })
+        })
+        .collect()
+}
+
+fn path_for_json(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn sha256_hash(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
+}
+
+fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .expect("system clock timestamp formats as RFC3339")
 }
 
 fn internal_problem() -> Response<Body> {

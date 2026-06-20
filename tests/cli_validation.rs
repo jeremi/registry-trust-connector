@@ -9,9 +9,11 @@ use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa,
     KeyPair, KeyUsagePurpose,
 };
+use registry_config_report::PRODUCT_DIAGNOSTIC_REPORT_SCHEMA_V1;
 use registry_trust_connector::identity::{load_certs, load_private_key};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, RootCertStore};
+use serde_json::Value;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -58,6 +60,25 @@ fn validate_accepts_valid_server_config() {
 }
 
 #[test]
+fn validate_json_reports_valid_server_config() {
+    let temp = TempDir::new().expect("temp dir");
+    let certs = write_test_pki(temp.path());
+    let config = temp.path().join("server.yaml");
+    fs::write(&config, server_config_yaml(&certs, None)).expect("write server config");
+
+    let output = validate_command(&config)
+        .args(["--mode", "server", "--format", "json"])
+        .output()
+        .expect("run validate command");
+
+    assert_success(&output);
+    let report = parse_stdout_json(&output);
+    assert_diagnostic_report(&report);
+    assert_eq!(report["status"], "ok");
+    assert!(diagnostic_with_code(&report, "connector.config.valid").is_some());
+}
+
+#[test]
 fn validate_exits_nonzero_for_invalid_config() {
     let temp = TempDir::new().expect("temp dir");
     let config = temp.path().join("invalid.yaml");
@@ -79,6 +100,43 @@ routes: []
     assert_stderr_contains(&output, "config failed validation");
     assert_stderr_contains(&output, "client config requires server");
     assert_stderr_contains(&output, "routes must not be empty");
+}
+
+#[test]
+fn validate_json_reports_required_env_failure() {
+    let temp = TempDir::new().expect("temp dir");
+    let certs = write_test_pki(temp.path());
+    let config = temp.path().join("server-require-env.yaml");
+    fs::write(
+        &config,
+        server_config_yaml(&certs, Some("REGISTRY_TRUST_CONNECTOR_TEST_MISSING_ENV")),
+    )
+    .expect("write server config");
+
+    let output = validate_command(&config)
+        .args(["--mode", "server", "--require-env", "--format", "json"])
+        .env_remove("REGISTRY_TRUST_CONNECTOR_TEST_MISSING_ENV")
+        .output()
+        .expect("run validate command");
+
+    assert_failure(&output);
+    let report = parse_stdout_json(&output);
+    assert_diagnostic_report(&report);
+    assert_eq!(report["status"], "error");
+    let diagnostic = diagnostic_with_code(&report, "connector.config.validation_error")
+        .expect("validation diagnostic");
+    assert!(diagnostic["message"]
+        .as_str()
+        .expect("message string")
+        .contains("REGISTRY_TRUST_CONNECTOR_TEST_MISSING_ENV"));
+    let required_env = report["required_env"]
+        .as_array()
+        .expect("required env array")
+        .iter()
+        .find(|env| env["name"] == "REGISTRY_TRUST_CONNECTOR_TEST_MISSING_ENV")
+        .expect("missing env is reported");
+    assert_eq!(required_env["status"], "missing");
+    assert_eq!(required_env["classification"], "secret");
 }
 
 #[test]
@@ -245,6 +303,45 @@ fn validate_command(config: &Path) -> Command {
     command.args(["validate", "--config"]);
     command.arg(config);
     command
+}
+
+fn parse_stdout_json(output: &Output) -> Value {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "stdout must be one JSON document: {err}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
+fn assert_schema_valid(schema: &str, report: &Value) {
+    let schema: Value = serde_json::from_str(schema).expect("schema parses");
+    let compiled = jsonschema::JSONSchema::compile(&schema).expect("schema compiles");
+    if let Err(errors) = compiled.validate(report) {
+        let messages = errors.map(|error| error.to_string()).collect::<Vec<_>>();
+        panic!("report should validate against schema: {messages:?}\n{report:#}");
+    };
+}
+
+fn assert_diagnostic_report(report: &Value) {
+    assert_schema_valid(PRODUCT_DIAGNOSTIC_REPORT_SCHEMA_V1, report);
+    assert_eq!(
+        report["schema_version"],
+        "registry.config.diagnostic_report.v1"
+    );
+    assert_eq!(report["product"], "registry-trust-connector");
+    assert_eq!(
+        report["config_schema_version"],
+        "registry.trust_connector.config.v1"
+    );
+}
+
+fn diagnostic_with_code<'a>(report: &'a Value, code: &str) -> Option<&'a Value> {
+    report["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == code)
 }
 
 fn server_command(config: &Path) -> Command {

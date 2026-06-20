@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -335,12 +335,29 @@ fn authorize_server_purpose(
         consent_ref: None,
         asserted_assurance: None,
         jurisdiction: None,
+        requester_identity: None,
+        subject_ref: None,
+        relationship: None,
+        on_behalf_of: None,
+        requested_fact: None,
+        requested_disclosure: None,
+        requested_credential_format: None,
+        source_binding: None,
+        route_identity: None,
+        checked_scopes: BTreeSet::new(),
+        source_observed_at_unix_seconds: None,
         source_observed_age_seconds: None,
     };
     let policy = PdpPolicyInput {
         policy_id: format!("trust-connector.route.{}", route_match.route.id),
         policy_hash: route_purpose_policy_hash(route_match),
+        ecosystem_binding_id: None,
+        ecosystem_binding_version: None,
         rule_ids: vec![format!("route-purpose:{}", route_match.route.id)],
+        rule_ids_by_gate: Default::default(),
+        permit_unconstrained: false,
+        required_context: BTreeSet::new(),
+        odrl_constraint_terms: Vec::new(),
         purpose_constraints,
         permitted_jurisdictions: Vec::new(),
         allowed_assurance: Vec::new(),
@@ -348,7 +365,17 @@ fn authorize_server_purpose(
         max_source_age_seconds: None,
         require_legal_basis: false,
         require_consent: false,
+        allowed_legal_basis_refs: Vec::new(),
+        allowed_consent_refs: Vec::new(),
         redaction_fields: Default::default(),
+        allowed_relationships: Vec::new(),
+        relationship_purpose_constraints: Vec::new(),
+        allowed_requested_facts: Vec::new(),
+        allowed_requested_disclosures: Vec::new(),
+        allowed_credential_formats: Vec::new(),
+        allowed_source_bindings: Vec::new(),
+        allowed_route_identities: Vec::new(),
+        required_checked_scopes: BTreeSet::new(),
         unsupported_odrl_terms: Vec::new(),
     };
     match pdp_decide(&context, &policy) {
